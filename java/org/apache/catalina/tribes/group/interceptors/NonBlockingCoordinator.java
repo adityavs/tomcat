@@ -16,6 +16,11 @@
  */
 package org.apache.catalina.tribes.group.interceptors;
 
+import java.net.ConnectException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.catalina.tribes.Channel;
@@ -153,7 +158,7 @@ public class NonBlockingCoordinator extends ChannelInterceptorBase {
     /**
      * Our current view
      */
-    protected Membership view = null;
+    protected volatile Membership view = null;
     /**
      * Out current viewId
      */
@@ -169,9 +174,9 @@ public class NonBlockingCoordinator extends ChannelInterceptorBase {
      * and this is the one we are running
      */
     protected UniqueId suggestedviewId;
-    protected Membership suggestedView;
+    protected volatile Membership suggestedView;
 
-    protected boolean started = false;
+    protected volatile boolean started = false;
     protected final int startsvc = 0xFFFF;
 
     protected final Object electionMutex = new Object();
@@ -190,7 +195,7 @@ public class NonBlockingCoordinator extends ChannelInterceptorBase {
         synchronized (electionMutex) {
             Member local = getLocalMember(false);
             Member[] others = membership.getMembers();
-            fireInterceptorEvent(new CoordinationEvent(CoordinationEvent.EVT_START_ELECT,this,"Election initated"));
+            fireInterceptorEvent(new CoordinationEvent(CoordinationEvent.EVT_START_ELECT,this,"Election initiated"));
             if ( others.length == 0 ) {
                 this.viewId = new UniqueId(UUIDGenerator.randomUUID(false));
                 this.view = new Membership(local,AbsoluteOrder.comp, true);
@@ -287,13 +292,26 @@ public class NonBlockingCoordinator extends ChannelInterceptorBase {
     }
 
     protected boolean alive(Member mbr) {
-        return TcpFailureDetector.memberAlive(mbr,
-                                              COORD_ALIVE,
-                                              false,
-                                              false,
-                                              waitForCoordMsgTimeout,
-                                              waitForCoordMsgTimeout,
-                                              getOptionFlag());
+        return memberAlive(mbr, waitForCoordMsgTimeout);
+    }
+
+    protected boolean memberAlive(Member mbr, long conTimeout) {
+        //could be a shutdown notification
+        if ( Arrays.equals(mbr.getCommand(),Member.SHUTDOWN_PAYLOAD) ) return false;
+
+        try (Socket socket = new Socket()) {
+            InetAddress ia = InetAddress.getByAddress(mbr.getHost());
+            InetSocketAddress addr = new InetSocketAddress(ia, mbr.getPort());
+            socket.connect(addr, (int) conTimeout);
+            return true;
+        } catch (SocketTimeoutException sx) {
+            //do nothing, we couldn't connect
+        } catch (ConnectException cx) {
+            //do nothing, we couldn't connect
+        } catch (Exception x) {
+            log.error(sm.getString("nonBlockingCoordinator.memberAlive.failed"),x);
+        }
+        return false;
     }
 
     protected Membership mergeOnArrive(CoordinationMessage msg) {

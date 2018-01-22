@@ -21,6 +21,7 @@ import java.io.PrintWriter;
 
 import org.apache.tomcat.util.net.SSLHostConfig;
 import org.apache.tomcat.util.net.SSLHostConfigCertificate;
+import org.apache.tomcat.util.net.openssl.OpenSSLConf;
 
 /**
  * Store SSLHostConfig
@@ -28,12 +29,8 @@ import org.apache.tomcat.util.net.SSLHostConfigCertificate;
 public class SSLHostConfigSF extends StoreFactoryBase {
 
     /**
-     * Store SSLHostConfig description
-     *
-     * @param aWriter
-     * @param indent
-     * @param aSSLHostConfig
-     * @throws Exception
+     * Store nested SSLHostConfigCertificate elements.
+     * {@inheritDoc}
      */
     @Override
     public void storeChildren(PrintWriter aWriter, int indent, Object aSSLHostConfig,
@@ -43,6 +40,9 @@ public class SSLHostConfigSF extends StoreFactoryBase {
             // Store nested <SSLHostConfigCertificate> elements
             SSLHostConfigCertificate[] hostConfigsCertificates = sslHostConfig.getCertificates().toArray(new SSLHostConfigCertificate[0]);
             storeElementArray(aWriter, indent, hostConfigsCertificates);
+            // Store nested <OpenSSLConf> element
+            OpenSSLConf openSslConf = sslHostConfig.getOpenSslConf();
+            storeElement(aWriter, indent, openSslConf);
         }
     }
 

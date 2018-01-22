@@ -31,7 +31,7 @@ public class RequestUtil {
      *
      * @param path Relative path to be normalized
      *
-     * @return The normalized path or <code>null</code> of the path cannot be
+     * @return The normalized path or <code>null</code> if the path cannot be
      *         normalized
      */
     public static String normalize(String path) {
@@ -48,7 +48,7 @@ public class RequestUtil {
      * @param path Relative path to be normalized
      * @param replaceBackSlash Should '\\' be replaced with '/'
      *
-     * @return The normalized path or <code>null</code> of the path cannot be
+     * @return The normalized path or <code>null</code> if the path cannot be
      *         normalized
      */
     public static String normalize(String path, boolean replaceBackSlash) {
@@ -67,12 +67,10 @@ public class RequestUtil {
         if (!normalized.startsWith("/"))
             normalized = "/" + normalized;
 
-        if (normalized.equals("/.")) {
-            return "/";
-        }
-
-        if (normalized.equals("/..")) {
-            return null;  // Trying to go outside our context
+        boolean addedTrailingSlash = false;
+        if (normalized.endsWith("/.") || normalized.endsWith("/..")) {
+            normalized = normalized + "/";
+            addedTrailingSlash = true;
         }
 
         // Resolve occurrences of "//" in the normalized path
@@ -104,6 +102,12 @@ public class RequestUtil {
             }
             int index2 = normalized.lastIndexOf('/', index - 1);
             normalized = normalized.substring(0, index2) + normalized.substring(index + 3);
+        }
+
+        if (normalized.length() > 1 && addedTrailingSlash) {
+            // Remove the trailing '/' we added to that input and output are
+            // consistent w.r.t. to the presence of the trailing '/'.
+            normalized = normalized.substring(0, normalized.length() - 1);
         }
 
         // Return the normalized path that we have completed

@@ -16,8 +16,6 @@
  */
 package org.apache.catalina;
 
-import java.util.Locale;
-
 /**
  * Global constants that are applicable to multiple packages within Catalina.
  *
@@ -224,7 +222,7 @@ public final class Globals {
      * compliance.
      */
     public static final boolean STRICT_SERVLET_COMPLIANCE =
-        Boolean.valueOf(System.getProperty("org.apache.catalina.STRICT_SERVLET_COMPLIANCE", "false")).booleanValue();
+        Boolean.parseBoolean(System.getProperty("org.apache.catalina.STRICT_SERVLET_COMPLIANCE", "false"));
 
 
     /**
@@ -274,30 +272,11 @@ public final class Globals {
     public static final String JASPER_XML_BLOCK_EXTERNAL_INIT_PARAM =
             "org.apache.jasper.XML_BLOCK_EXTERNAL";
 
-    static {
-        /**
-         * There are a few places where Tomcat either accesses JVM internals
-         * (e.g. the memory leak protection) or where feature support varies
-         * between JVMs (e.g. SPNEGO). These flags exist to enable Tomcat to
-         * adjust its behaviour based on the vendor of the JVM. In an ideal
-         * world this code would not exist.
-         */
-        String vendor = System.getProperty("java.vendor", "");
-        vendor = vendor.toLowerCase(Locale.ENGLISH);
-
-        if (vendor.startsWith("oracle") || vendor.startsWith("sun")) {
-            IS_ORACLE_JVM = true;
-            IS_IBM_JVM = false;
-        } else if (vendor.contains("ibm")) {
-            IS_ORACLE_JVM = false;
-            IS_IBM_JVM = true;
-        } else {
-            IS_ORACLE_JVM = false;
-            IS_IBM_JVM = false;
-        }
-    }
-
-    public static final boolean IS_ORACLE_JVM;
-
-    public static final boolean IS_IBM_JVM;
+    /**
+     * Name of the ServletContext attribute under which we store the context
+     * Realm's CredentialHandler (if both the Realm and the CredentialHandler
+     * exist).
+     */
+    public static final String CREDENTIAL_HANDLER
+            = "org.apache.catalina.CredentialHandler";
 }

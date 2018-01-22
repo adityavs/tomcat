@@ -96,7 +96,6 @@ public class DeltaRequest implements Externalizable {
     }
 
     /**
-     * convert principal at SerializablePrincipal for backup nodes.
      * Only support principals from type {@link GenericPrincipal GenericPrincipal}
      * @param p Session principal
      * @see GenericPrincipal
@@ -301,7 +300,7 @@ public class DeltaRequest implements Externalizable {
      * @see DeltaRequest#writeExternal(java.io.ObjectOutput)
      *
      * @return serialized delta request
-     * @throws IOException
+     * @throws IOException IO error serializing
      */
     protected byte[] serialize() throws IOException {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();

@@ -18,43 +18,78 @@ package org.apache.coyote.http2;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.AccessController;
+import java.security.PrivilegedActionException;
+import java.security.PrivilegedExceptionAction;
+import java.util.Collections;
 import java.util.Iterator;
+import java.util.Locale;
+import java.util.Map;
+import java.util.function.Supplier;
 
+import org.apache.coyote.ActionCode;
+import org.apache.coyote.CloseNowException;
 import org.apache.coyote.InputBuffer;
-import org.apache.coyote.OutputBuffer;
 import org.apache.coyote.Request;
 import org.apache.coyote.Response;
+import org.apache.coyote.http11.HttpOutputBuffer;
+import org.apache.coyote.http11.OutputFilter;
 import org.apache.coyote.http2.HpackDecoder.HeaderEmitter;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
 import org.apache.tomcat.util.buf.ByteChunk;
+import org.apache.tomcat.util.buf.MessageBytes;
+import org.apache.tomcat.util.http.MimeHeaders;
+import org.apache.tomcat.util.net.ApplicationBufferHandler;
 import org.apache.tomcat.util.res.StringManager;
 
-public class Stream extends AbstractStream implements HeaderEmitter {
+class Stream extends AbstractStream implements HeaderEmitter {
 
     private static final Log log = LogFactory.getLog(Stream.class);
     private static final StringManager sm = StringManager.getManager(Stream.class);
 
+    private static final int HEADER_STATE_START = 0;
+    private static final int HEADER_STATE_PSEUDO = 1;
+    private static final int HEADER_STATE_REGULAR = 2;
+    private static final int HEADER_STATE_TRAILER = 3;
+
+    private static final MimeHeaders ACK_HEADERS;
+
+    static {
+        Response response =  new Response();
+        response.setStatus(100);
+        StreamProcessor.prepareHeaders(null, response, true, null, null);
+        ACK_HEADERS = response.getMimeHeaders();
+    }
+
     private volatile int weight = Constants.DEFAULT_WEIGHT;
+    private volatile long contentLengthReceived = 0;
 
     private final Http2UpgradeHandler handler;
     private final StreamStateMachine state;
+    // State machine would be too much overhead
+    private int headerState = HEADER_STATE_START;
+    private StreamException headerException = null;
     // TODO: null these when finished to reduce memory used by closed stream
     private final Request coyoteRequest;
+    private StringBuilder cookieHeader = null;
     private final Response coyoteResponse = new Response();
     private final StreamInputBuffer inputBuffer;
-    private final StreamOutputBuffer outputBuffer = new StreamOutputBuffer();
+    private final StreamOutputBuffer streamOutputBuffer = new StreamOutputBuffer();
+    private final Http2OutputBuffer http2OutputBuffer =
+            new Http2OutputBuffer(coyoteResponse, streamOutputBuffer);
 
 
-    public Stream(Integer identifier, Http2UpgradeHandler handler) {
+    Stream(Integer identifier, Http2UpgradeHandler handler) {
         this(identifier, handler, null);
     }
 
 
-    public Stream(Integer identifier, Http2UpgradeHandler handler, Request coyoteRequest) {
+    Stream(Integer identifier, Http2UpgradeHandler handler, Request coyoteRequest) {
         super(identifier);
         this.handler = handler;
-        setParentStream(handler);
+        handler.addChild(this);
         setWindowSize(handler.getRemoteSettings().getInitialWindowSize());
         state = new StreamStateMachine(this);
         if (coyoteRequest == null) {
@@ -69,14 +104,19 @@ public class Stream extends AbstractStream implements HeaderEmitter {
             // Headers have been populated by this point
             state.receivedStartOfHeaders();
             // TODO Assuming the body has been read at this point is not valid
-            state.recievedEndOfStream();
+            state.receivedEndOfStream();
         }
-        this.coyoteResponse.setOutputBuffer(outputBuffer);
+        this.coyoteRequest.setSendfile(handler.hasAsyncIO() && handler.getProtocol().getUseSendfile());
+        this.coyoteResponse.setOutputBuffer(http2OutputBuffer);
         this.coyoteRequest.setResponse(coyoteResponse);
+        this.coyoteRequest.protocol().setString("HTTP/2.0");
+        if (this.coyoteRequest.getStartTime() < 0) {
+            this.coyoteRequest.setStartTime(System.currentTimeMillis());
+        }
     }
 
 
-    public void rePrioritise(AbstractStream parent, boolean exclusive, int weight) {
+    final void rePrioritise(AbstractStream parent, boolean exclusive, int weight) {
         if (log.isDebugEnabled()) {
             log.debug(sm.getString("stream.reprioritisation.debug",
                     getConnectionId(), getIdentifier(), Boolean.toString(exclusive),
@@ -86,40 +126,68 @@ public class Stream extends AbstractStream implements HeaderEmitter {
         // Check if new parent is a descendant of this stream
         if (isDescendant(parent)) {
             parent.detachFromParent();
-            getParentStream().addChild(parent);
+            // Cast is always safe since any descendant of this stream must be
+            // an instance of Stream
+            getParentStream().addChild((Stream) parent);
         }
 
         if (exclusive) {
             // Need to move children of the new parent to be children of this
             // stream. Slightly convoluted to avoid concurrent modification.
-            Iterator<AbstractStream> parentsChildren = parent.getChildStreams().iterator();
+            Iterator<Stream> parentsChildren = parent.getChildStreams().iterator();
             while (parentsChildren.hasNext()) {
-                AbstractStream parentsChild = parentsChildren.next();
+                Stream parentsChild = parentsChildren.next();
                 parentsChildren.remove();
                 this.addChild(parentsChild);
             }
         }
+        detachFromParent();
         parent.addChild(this);
         this.weight = weight;
     }
 
 
-    public void reset(long errorCode) {
+    /*
+     * Used when removing closed streams from the tree and we know there is no
+     * need to check for circular references.
+     */
+    final void rePrioritise(AbstractStream parent, int weight) {
         if (log.isDebugEnabled()) {
-            log.debug(sm.getString("stream.reset.debug", getConnectionId(), getIdentifier(),
-                    Long.toString(errorCode)));
+            log.debug(sm.getString("stream.reprioritisation.debug",
+                    getConnectionId(), getIdentifier(), Boolean.FALSE,
+                    parent.getIdentifier(), Integer.toString(weight)));
         }
-        state.receiveReset();
+
+        parent.addChild(this);
+        this.weight = weight;
     }
 
 
-    void checkState(FrameType frameType) throws Http2Exception {
+    final void receiveReset(long errorCode) {
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("stream.reset.receive", getConnectionId(), getIdentifier(),
+                    Long.toString(errorCode)));
+        }
+        // Set the new state first since read and write both check this
+        state.receivedReset();
+        // Reads wait internally so need to call a method to break the wait()
+        if (inputBuffer != null) {
+            inputBuffer.receiveReset();
+        }
+        // Writes wait on Stream so we can notify directly
+        synchronized (this) {
+            this.notifyAll();
+        }
+    }
+
+
+    final void checkState(FrameType frameType) throws Http2Exception {
         state.checkFrameType(frameType);
     }
 
 
     @Override
-    public synchronized void incrementWindowSize(int windowSizeIncrement) throws Http2Exception {
+    final synchronized void incrementWindowSize(int windowSizeIncrement) throws Http2Exception {
         // If this is zero then any thread that has been trying to write for
         // this stream will be waiting. Notify that thread it can continue. Use
         // notify all even though only one thread is waiting to be on the safe
@@ -132,11 +200,20 @@ public class Stream extends AbstractStream implements HeaderEmitter {
     }
 
 
-    private synchronized int reserveWindowSize(int reservation) throws IOException {
+    final synchronized int reserveWindowSize(int reservation, boolean block)
+            throws IOException {
         long windowSize = getWindowSize();
         while (windowSize < 1) {
+            if (!canWrite()) {
+                throw new CloseNowException(sm.getString("stream.notWritable",
+                        getConnectionId(), getIdentifier()));
+            }
             try {
-                wait();
+                if (block) {
+                    wait();
+                } else {
+                    return 0;
+                }
             } catch (InterruptedException e) {
                 // Possible shutdown / rst or similar. Use an IOException to
                 // signal to the client that further I/O isn't possible for this
@@ -157,139 +234,468 @@ public class Stream extends AbstractStream implements HeaderEmitter {
 
 
     @Override
-    public void emitHeader(String name, String value, boolean neverIndex) {
+    public final void emitHeader(String name, String value) throws HpackException {
         if (log.isDebugEnabled()) {
             log.debug(sm.getString("stream.header.debug", getConnectionId(), getIdentifier(),
                     name, value));
         }
 
+        // Header names must be lower case
+        if (!name.toLowerCase(Locale.US).equals(name)) {
+            throw new HpackException(sm.getString("stream.header.case",
+                    getConnectionId(), getIdentifier(), name));
+        }
+
+        if ("connection".equals(name)) {
+            throw new HpackException(sm.getString("stream.header.connection",
+                    getConnectionId(), getIdentifier()));
+        }
+
+        if ("te".equals(name)) {
+            if (!"trailers".equals(value)) {
+                throw new HpackException(sm.getString("stream.header.te",
+                        getConnectionId(), getIdentifier(), value));
+            }
+        }
+
+        if (headerException != null) {
+            // Don't bother processing the header since the stream is going to
+            // be reset anyway
+            return;
+        }
+
+        boolean pseudoHeader = name.charAt(0) == ':';
+
+        if (pseudoHeader && headerState != HEADER_STATE_PSEUDO) {
+            headerException = new StreamException(sm.getString(
+                    "stream.header.unexpectedPseudoHeader", getConnectionId(), getIdentifier(),
+                    name), Http2Error.PROTOCOL_ERROR, getIdentifier().intValue());
+            // No need for further processing. The stream will be reset.
+            return;
+        }
+
+        if (headerState == HEADER_STATE_PSEUDO && !pseudoHeader) {
+            headerState = HEADER_STATE_REGULAR;
+        }
+
         switch(name) {
         case ":method": {
-            coyoteRequest.method().setString(value);
-            break;
-        }
-        case ":path": {
-            coyoteRequest.requestURI().setString(value);
-            // TODO: This is almost certainly wrong and needs to be decoded
-            coyoteRequest.decodedURI().setString(value);
-            break;
-        }
-        case ":authority": {
-            int i = value.lastIndexOf(':');
-            if (i > -1) {
-                coyoteRequest.serverName().setString(value.substring(0, i));
-                coyoteRequest.setServerPort(Integer.parseInt(value.substring(i + 1)));
+            if (coyoteRequest.method().isNull()) {
+                coyoteRequest.method().setString(value);
             } else {
-                coyoteRequest.serverName().setString(value);
-                boolean secure = Boolean.parseBoolean(handler.getProperty("secure"));
-                if (secure) {
-                    coyoteRequest.setServerPort(443);
-                } else {
-                    coyoteRequest.setServerPort(80);
-                }
+                throw new HpackException(sm.getString("stream.header.duplicate",
+                        getConnectionId(), getIdentifier(), ":method" ));
             }
             break;
         }
+        case ":scheme": {
+            if (coyoteRequest.scheme().isNull()) {
+                coyoteRequest.scheme().setString(value);
+            } else {
+                throw new HpackException(sm.getString("stream.header.duplicate",
+                        getConnectionId(), getIdentifier(), ":scheme" ));
+            }
+            break;
+        }
+        case ":path": {
+            if (!coyoteRequest.requestURI().isNull()) {
+                throw new HpackException(sm.getString("stream.header.duplicate",
+                        getConnectionId(), getIdentifier(), ":path" ));
+            }
+            if (value.length() == 0) {
+                throw new HpackException(sm.getString("stream.header.noPath",
+                        getConnectionId(), getIdentifier()));
+            }
+            int queryStart = value.indexOf('?');
+            String uri;
+            if (queryStart == -1) {
+                uri = value;
+            } else {
+                uri = value.substring(0, queryStart);
+                String query = value.substring(queryStart + 1);
+                coyoteRequest.queryString().setString(query);
+            }
+            // Bug 61120. Set the URI as bytes rather than String so:
+            // - any path parameters are correctly processed
+            // - the normalization security checks are performed that prevent
+            //   directory traversal attacks
+            byte[] uriBytes = uri.getBytes(StandardCharsets.ISO_8859_1);
+            coyoteRequest.requestURI().setBytes(uriBytes, 0, uriBytes.length);
+            break;
+        }
+        case ":authority": {
+            if (coyoteRequest.serverName().isNull()) {
+                int i = value.lastIndexOf(':');
+                if (i > -1) {
+                    coyoteRequest.serverName().setString(value.substring(0, i));
+                    coyoteRequest.setServerPort(Integer.parseInt(value.substring(i + 1)));
+                } else {
+                    coyoteRequest.serverName().setString(value);
+                }
+            } else {
+                throw new HpackException(sm.getString("stream.header.duplicate",
+                        getConnectionId(), getIdentifier(), ":authority" ));
+            }
+            break;
+        }
+        case "cookie": {
+            // Cookie headers need to be concatenated into a single header
+            // See RFC 7540 8.1.2.5
+            if (cookieHeader == null) {
+                cookieHeader = new StringBuilder();
+            } else {
+                cookieHeader.append("; ");
+            }
+            cookieHeader.append(value);
+            break;
+        }
         default: {
-            // Assume other HTTP header
-            coyoteRequest.getMimeHeaders().addValue(name).setString(value);
-        }
-        }
-    }
+            if (headerState == HEADER_STATE_TRAILER &&
+                    !handler.getProtocol().isTrailerHeaderAllowed(name)) {
+                break;
+            }
+            if ("expect".equals(name) && "100-continue".equals(value)) {
+                coyoteRequest.setExpectation(true);
+            }
+            if (pseudoHeader) {
+                headerException = new StreamException(sm.getString(
+                        "stream.header.unknownPseudoHeader", getConnectionId(), getIdentifier(),
+                        name), Http2Error.PROTOCOL_ERROR, getIdentifier().intValue());
+            }
 
-
-    void writeHeaders() {
-        try {
-            handler.writeHeaders(this, coyoteResponse);
-        } catch (IOException e) {
-            // TODO Handle this
-            e.printStackTrace();
+            if (headerState == HEADER_STATE_TRAILER) {
+                // HTTP/2 headers are already always lower case
+                coyoteRequest.getTrailerFields().put(name, value);
+            } else {
+                coyoteRequest.getMimeHeaders().addValue(name).setString(value);
+            }
         }
-    }
-
-
-    void flushData() {
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("stream.write", getConnectionId(), getIdentifier()));
-        }
-        try {
-            outputBuffer.flush();
-        } catch (IOException e) {
-            // TODO Auto-generated catch block
-            e.printStackTrace();
         }
     }
 
 
     @Override
-    protected final String getConnectionId() {
-        return getParentStream().getConnectionId();
+    public void setHeaderException(StreamException streamException) {
+        if (headerException == null) {
+            headerException = streamException;
+        }
     }
 
 
     @Override
-    protected int getWeight() {
+    public void validateHeaders() throws StreamException {
+        if (headerException == null) {
+            return;
+        }
+
+        throw headerException;
+    }
+
+
+    final boolean receivedEndOfHeaders() throws ConnectionException {
+        if (coyoteRequest.method().isNull() || coyoteRequest.scheme().isNull() ||
+                coyoteRequest.requestURI().isNull()) {
+            throw new ConnectionException(sm.getString("stream.header.required",
+                    getConnectionId(), getIdentifier()), Http2Error.PROTOCOL_ERROR);
+        }
+        // Cookie headers need to be concatenated into a single header
+        // See RFC 7540 8.1.2.5
+        // Can only do this once the headers are fully received
+        if (cookieHeader != null) {
+            coyoteRequest.getMimeHeaders().addValue("cookie").setString(cookieHeader.toString());
+        }
+        return headerState == HEADER_STATE_REGULAR || headerState == HEADER_STATE_PSEUDO;
+    }
+
+
+    final void writeHeaders() throws IOException {
+        boolean endOfStream = streamOutputBuffer.hasNoBody() &&
+                coyoteResponse.getTrailerFields() == null;
+        // TODO: Is 1k the optimal value?
+        handler.writeHeaders(this, 0, coyoteResponse.getMimeHeaders(), endOfStream, 1024);
+    }
+
+
+    final void addOutputFilter(OutputFilter filter) {
+        http2OutputBuffer.addFilter(filter);
+    }
+
+
+    final void writeTrailers() throws IOException {
+        Supplier<Map<String,String>> supplier = coyoteResponse.getTrailerFields();
+        if (supplier == null) {
+            // No supplier was set, end of stream will already have been sent
+            return;
+        }
+
+        // We can re-use the MimeHeaders from the response since they have
+        // already been processed by the encoder at this point
+        MimeHeaders mimeHeaders = coyoteResponse.getMimeHeaders();
+        mimeHeaders.recycle();
+
+        Map<String,String> headerMap = supplier.get();
+        if (headerMap == null) {
+            headerMap = Collections.emptyMap();
+        }
+
+        // Copy the contents of the Map to the MimeHeaders
+        // TODO: Is there benefit in refactoring this? Is MimeHeaders too
+        //       heavyweight? Can we reduce the copy/conversions?
+        for (Map.Entry<String, String> headerEntry : headerMap.entrySet()) {
+            MessageBytes mb = mimeHeaders.addValue(headerEntry.getKey());
+            mb.setString(headerEntry.getValue());
+        }
+
+        handler.writeHeaders(this, 0, mimeHeaders, true, 1024);
+    }
+
+
+    final void writeAck() throws IOException {
+        // TODO: Is 64 too big? Just the status header with compression
+        handler.writeHeaders(this, 0, ACK_HEADERS, false, 64);
+    }
+
+
+    @Override
+    final String getConnectionId() {
+        return handler.getConnectionId();
+    }
+
+
+    @Override
+    final int getWeight() {
         return weight;
     }
 
 
-    Request getCoyoteRequest() {
+    final Request getCoyoteRequest() {
         return coyoteRequest;
     }
 
 
-    Response getCoyoteResponse() {
+    final Response getCoyoteResponse() {
         return coyoteResponse;
     }
 
 
-    ByteBuffer getInputByteBuffer() {
+    final ByteBuffer getInputByteBuffer() {
         return inputBuffer.getInBuffer();
     }
 
 
-    void receivedStartOfHeaders() {
+    final void receivedStartOfHeaders(boolean headersEndStream) throws Http2Exception {
+        if (headerState == HEADER_STATE_START) {
+            headerState = HEADER_STATE_PSEUDO;
+            handler.getHpackDecoder().setMaxHeaderCount(handler.getProtocol().getMaxHeaderCount());
+            handler.getHpackDecoder().setMaxHeaderSize(handler.getProtocol().getMaxHeaderSize());
+        } else if (headerState == HEADER_STATE_PSEUDO || headerState == HEADER_STATE_REGULAR) {
+            // Trailer headers MUST include the end of stream flag
+            if (headersEndStream) {
+                headerState = HEADER_STATE_TRAILER;
+                handler.getHpackDecoder().setMaxHeaderCount(
+                        handler.getProtocol().getMaxTrailerCount());
+                handler.getHpackDecoder().setMaxHeaderSize(
+                        handler.getProtocol().getMaxTrailerSize());
+            } else {
+                throw new ConnectionException(sm.getString("stream.trailerHeader.noEndOfStream",
+                        getConnectionId(), getIdentifier()), Http2Error.PROTOCOL_ERROR);
+            }
+        }
+        // Parser will catch attempt to send a headers frame after the stream
+        // has closed.
         state.receivedStartOfHeaders();
     }
 
 
-    void receivedEndOfStream() {
-        state.recievedEndOfStream();
+    final void receivedData(int payloadSize) throws ConnectionException {
+        contentLengthReceived += payloadSize;
+        long contentLengthHeader = coyoteRequest.getContentLengthLong();
+        if (contentLengthHeader > -1 && contentLengthReceived > contentLengthHeader) {
+            throw new ConnectionException(sm.getString("stream.header.contentLength",
+                    getConnectionId(), getIdentifier(), Long.valueOf(contentLengthHeader),
+                    Long.valueOf(contentLengthReceived)), Http2Error.PROTOCOL_ERROR);
+        }
     }
 
 
-    void sentEndOfStream() {
-        outputBuffer.endOfStreamSent = true;
+    final void receivedEndOfStream() throws ConnectionException {
+        long contentLengthHeader = coyoteRequest.getContentLengthLong();
+        if (contentLengthHeader > -1 && contentLengthReceived != contentLengthHeader) {
+            throw new ConnectionException(sm.getString("stream.header.contentLength",
+                    getConnectionId(), getIdentifier(), Long.valueOf(contentLengthHeader),
+                    Long.valueOf(contentLengthReceived)), Http2Error.PROTOCOL_ERROR);
+        }
+        state.receivedEndOfStream();
+        if (inputBuffer != null) {
+            inputBuffer.notifyEof();
+        }
+    }
+
+
+    final void sentEndOfStream() {
+        streamOutputBuffer.endOfStreamSent = true;
         state.sentEndOfStream();
     }
 
 
-    StreamOutputBuffer getOutputBuffer() {
-        return outputBuffer;
+    final boolean isReady() {
+        return streamOutputBuffer.isReady();
     }
 
 
-    void sendRst() {
-        state.sendReset();
+    final boolean flush(boolean block) throws IOException {
+        return streamOutputBuffer.flush(block);
     }
 
 
-    boolean isActive() {
+    final StreamInputBuffer getInputBuffer() {
+        return inputBuffer;
+    }
+
+
+    final HttpOutputBuffer getOutputBuffer() {
+        return http2OutputBuffer;
+    }
+
+
+    final void sentPushPromise() {
+        state.sentPushPromise();
+    }
+
+
+    final boolean isActive() {
         return state.isActive();
     }
 
 
-    boolean isClosedFinal() {
+    final boolean canWrite() {
+        return state.canWrite();
+    }
+
+
+    final boolean isClosedFinal() {
         return state.isClosedFinal();
     }
 
 
-    void closeIfIdle() {
+    final void closeIfIdle() {
         state.closeIfIdle();
     }
 
 
-    class StreamOutputBuffer implements OutputBuffer {
+    private final boolean isInputFinished() {
+        return !state.isFrameTypePermitted(FrameType.DATA);
+    }
+
+
+    final void close(Http2Exception http2Exception) {
+        if (http2Exception instanceof StreamException) {
+            try {
+                StreamException se = (StreamException) http2Exception;
+                if (log.isDebugEnabled()) {
+                    log.debug(sm.getString("stream.reset.send", getConnectionId(), getIdentifier(),
+                            se.getError()));
+                }
+                state.sendReset();
+                handler.sendStreamReset(se);
+            } catch (IOException ioe) {
+                ConnectionException ce = new ConnectionException(
+                        sm.getString("stream.reset.fail"), Http2Error.PROTOCOL_ERROR);
+                ce.initCause(ioe);
+                handler.closeConnection(ce);
+            }
+        } else {
+            handler.closeConnection(http2Exception);
+        }
+    }
+
+
+    final boolean isPushSupported() {
+        return handler.getRemoteSettings().getEnablePush();
+    }
+
+
+    final void push(Request request) throws IOException {
+        if (!isPushSupported()) {
+            return;
+        }
+        // Set the special HTTP/2 headers
+        request.getMimeHeaders().addValue(":method").duplicate(request.method());
+        request.getMimeHeaders().addValue(":scheme").duplicate(request.scheme());
+        StringBuilder path = new StringBuilder(request.requestURI().toString());
+        if (!request.queryString().isNull()) {
+            path.append('?');
+            path.append(request.queryString().toString());
+        }
+        request.getMimeHeaders().addValue(":path").setString(path.toString());
+
+        // Authority needs to include the port only if a non-standard port is
+        // being used.
+        if (!(request.scheme().equals("http") && request.getServerPort() == 80) &&
+                !(request.scheme().equals("https") && request.getServerPort() == 443)) {
+            request.getMimeHeaders().addValue(":authority").setString(
+                    request.serverName().getString() + ":" + request.getServerPort());
+        } else {
+            request.getMimeHeaders().addValue(":authority").duplicate(request.serverName());
+        }
+
+        push(handler, request, this);
+    }
+
+
+    boolean isTrailerFieldsReady() {
+        // Once EndOfStream has been received, canRead will be false
+        return !state.canRead();
+    }
+
+
+    boolean isTrailerFieldsSupported() {
+        return !streamOutputBuffer.endOfStreamSent;
+    }
+
+
+    private static void push(final Http2UpgradeHandler handler, final Request request,
+            final Stream stream) throws IOException {
+        if (org.apache.coyote.Constants.IS_SECURITY_ENABLED) {
+            try {
+                AccessController.doPrivileged(new PrivilegedPush(handler, request, stream));
+            } catch (PrivilegedActionException ex) {
+                Exception e = ex.getException();
+                if (e instanceof IOException) {
+                    throw (IOException) e;
+                } else {
+                    throw new IOException(ex);
+                }
+            }
+
+        } else {
+            handler.push(request, stream);
+        }
+    }
+
+
+    private static class PrivilegedPush implements PrivilegedExceptionAction<Void> {
+
+        private final Http2UpgradeHandler handler;
+        private final Request request;
+        private final Stream stream;
+
+        public PrivilegedPush(Http2UpgradeHandler handler, Request request,
+                Stream stream) {
+            this.handler = handler;
+            this.request = request;
+            this.stream = stream;
+        }
+
+        @Override
+        public Void run() throws IOException {
+            handler.push(request, stream);
+            return null;
+        }
+    }
+
+
+    class StreamOutputBuffer implements HttpOutputBuffer {
 
         private final ByteBuffer buffer = ByteBuffer.allocate(8 * 1024);
         private volatile long written = 0;
@@ -302,87 +708,107 @@ public class Stream extends AbstractStream implements HeaderEmitter {
          */
 
         @Override
-        public synchronized int doWrite(ByteChunk chunk) throws IOException {
+        public final synchronized int doWrite(ByteBuffer chunk) throws IOException {
             if (closed) {
                 throw new IllegalStateException(
                         sm.getString("stream.closed", getConnectionId(), getIdentifier()));
             }
-            int len = chunk.getLength();
+            int chunkLimit = chunk.limit();
             int offset = 0;
-            while (len > 0) {
-                int thisTime = Math.min(buffer.remaining(), len);
-                buffer.put(chunk.getBytes(), chunk.getOffset() + offset, thisTime);
+            while (chunk.remaining() > 0) {
+                int thisTime = Math.min(buffer.remaining(), chunk.remaining());
+                chunk.limit(chunk.position() + thisTime);
+                buffer.put(chunk);
+                chunk.limit(chunkLimit);
                 offset += thisTime;
-                len -= thisTime;
-                if (len > 0 && !buffer.hasRemaining()) {
+                if (chunk.remaining() > 0 && !buffer.hasRemaining()) {
                     // Only flush if we have more data to write and the buffer
                     // is full
-                    flush(true);
+                    if (flush(true, coyoteResponse.getWriteListener() == null)) {
+                        break;
+                    }
                 }
             }
             written += offset;
             return offset;
         }
 
-        public synchronized void flush() throws IOException {
-            flush(false);
+        final synchronized boolean flush(boolean block) throws IOException {
+            return flush(false, block);
         }
 
-        private synchronized void flush(boolean writeInProgress) throws IOException {
+        private final synchronized boolean flush(boolean writeInProgress, boolean block)
+                throws IOException {
             if (log.isDebugEnabled()) {
-                log.debug(sm.getString("stream.outputBuffer.flush.debug", getConnectionId(), getIdentifier(),
-                        Integer.toString(buffer.position()), Boolean.toString(writeInProgress),
-                        Boolean.toString(closed)));
-            }
-            if (!coyoteResponse.isCommitted()) {
-                coyoteResponse.sendHeaders();
+                log.debug(sm.getString("stream.outputBuffer.flush.debug", getConnectionId(),
+                        getIdentifier(), Integer.toString(buffer.position()),
+                        Boolean.toString(writeInProgress), Boolean.toString(closed)));
             }
             if (buffer.position() == 0) {
                 if (closed && !endOfStreamSent) {
                     // Handling this special case here is simpler than trying
                     // to modify the following code to handle it.
-                    handler.writeBody(Stream.this, buffer, 0, true);
+                    handler.writeBody(Stream.this, buffer, 0,
+                            coyoteResponse.getTrailerFields() == null);
                 }
                 // Buffer is empty. Nothing to do.
-                return;
+                return false;
             }
             buffer.flip();
             int left = buffer.remaining();
             while (left > 0) {
-                int streamReservation  = reserveWindowSize(left);
+                int streamReservation  = reserveWindowSize(left, block);
+                if (streamReservation == 0) {
+                    // Must be non-blocking
+                    buffer.compact();
+                    return true;
+                }
                 while (streamReservation > 0) {
                     int connectionReservation =
                                 handler.reserveWindowSize(Stream.this, streamReservation);
                     // Do the write
                     handler.writeBody(Stream.this, buffer, connectionReservation,
-                            !writeInProgress && closed && left == connectionReservation);
+                            !writeInProgress && closed && left == connectionReservation &&
+                            coyoteResponse.getTrailerFields() == null);
                     streamReservation -= connectionReservation;
                     left -= connectionReservation;
-                    buffer.position(buffer.position() + connectionReservation);
                 }
             }
             buffer.clear();
+            return false;
+        }
+
+        final synchronized boolean isReady() {
+            if (getWindowSize() > 0 && handler.getWindowSize() > 0) {
+                return true;
+            } else {
+                return false;
+            }
         }
 
         @Override
-        public long getBytesWritten() {
+        public final long getBytesWritten() {
             return written;
         }
 
-        public void close() {
+        @Override
+        public final void end() throws IOException {
             closed = true;
-        }
-
-        public boolean isClosed() {
-            return closed;
+            flush(true);
+            writeTrailers();
         }
 
         /**
          * @return <code>true</code> if it is certain that the associated
          *         response has no body.
          */
-        public boolean hasNoBody() {
+        final boolean hasNoBody() {
             return ((written == 0) && closed);
+        }
+
+        @Override
+        public void flush() throws IOException {
+            flush(true);
         }
     }
 
@@ -404,8 +830,8 @@ public class Stream extends AbstractStream implements HeaderEmitter {
          * same copies as using two buffers and the behaviour would be less
          * clear.
          *
-         * The buffers are created lazily because 32K per stream quickly adds
-         * up to a lot of memory and most requests do not have bodies.
+         * The buffers are created lazily because they quickly add up to a lot
+         * of memory and most requests do not have bodies.
          */
         // This buffer is used to populate the ByteChunk passed in to the read
         // method
@@ -413,20 +839,30 @@ public class Stream extends AbstractStream implements HeaderEmitter {
         // This buffer is the destination for incoming data. It is normally is
         // 'write mode'.
         private volatile ByteBuffer inBuffer;
+        private volatile boolean readInterest;
+        private boolean reset = false;
 
         @Override
-        public int doRead(ByteChunk chunk) throws IOException {
+        public final int doRead(ApplicationBufferHandler applicationBufferHandler)
+                throws IOException {
 
             ensureBuffersExist();
 
-            int written = 0;
+            int written = -1;
 
             // Ensure that only one thread accesses inBuffer at a time
             synchronized (inBuffer) {
-                while (inBuffer.position() == 0 && state.isFrameTypePermitted(FrameType.DATA)) {
+                boolean canRead = false;
+                while (inBuffer.position() == 0 && (canRead = isActive() && !isInputFinished())) {
                     // Need to block until some data is written
                     try {
+                        if (log.isDebugEnabled()) {
+                            log.debug(sm.getString("stream.inputBuffer.empty"));
+                        }
                         inBuffer.wait();
+                        if (reset) {
+                            throw new IOException(sm.getString("stream.inputBuffer.reset"));
+                        }
                     } catch (InterruptedException e) {
                         // Possible shutdown / rst or similar. Use an
                         // IOException to signal to the client that further I/O
@@ -436,12 +872,17 @@ public class Stream extends AbstractStream implements HeaderEmitter {
                 }
 
                 if (inBuffer.position() > 0) {
-                    // Data remains in the in buffer. Copy it to the out buffer.
+                    // Data is available in the inBuffer. Copy it to the
+                    // outBuffer.
                     inBuffer.flip();
                     written = inBuffer.remaining();
+                    if (log.isDebugEnabled()) {
+                        log.debug(sm.getString("stream.inputBuffer.copy",
+                                Integer.toString(written)));
+                    }
                     inBuffer.get(outBuffer, 0, written);
                     inBuffer.clear();
-                } else if (!state.isFrameTypePermitted(FrameType.DATA)) {
+                } else if (!canRead) {
                     return -1;
                 } else {
                     // Should never happen
@@ -449,30 +890,105 @@ public class Stream extends AbstractStream implements HeaderEmitter {
                 }
             }
 
-            chunk.setBytes(outBuffer, 0,  written);
+            applicationBufferHandler.setByteBuffer(ByteBuffer.wrap(outBuffer, 0,  written));
 
             // Increment client-side flow control windows by the number of bytes
             // read
-            handler.writeWindowUpdate(Stream.this, written);
+            handler.writeWindowUpdate(Stream.this, written, true);
 
             return written;
         }
 
 
-        public ByteBuffer getInBuffer() {
+        final void registerReadInterest() {
+            if (inBuffer != null) {
+                synchronized (inBuffer) {
+                    readInterest = true;
+                }
+            }
+        }
+
+
+        final synchronized boolean isRequestBodyFullyRead() {
+            return (inBuffer == null || inBuffer.position() == 0) && isInputFinished();
+        }
+
+
+        final synchronized int available() {
+            if (inBuffer == null) {
+                return 0;
+            }
+            return inBuffer.position();
+        }
+
+
+        /*
+         * Called after placing some data in the inBuffer.
+         */
+        final synchronized boolean onDataAvailable() {
+            if (readInterest) {
+                if (log.isDebugEnabled()) {
+                    log.debug(sm.getString("stream.inputBuffer.dispatch"));
+                }
+                readInterest = false;
+                coyoteRequest.action(ActionCode.DISPATCH_READ, null);
+                // Always need to dispatch since this thread is processing
+                // the incoming connection and streams are processed on their
+                // own.
+                coyoteRequest.action(ActionCode.DISPATCH_EXECUTE, null);
+                return true;
+            } else {
+                if (log.isDebugEnabled()) {
+                    log.debug(sm.getString("stream.inputBuffer.signal"));
+                }
+                synchronized (inBuffer) {
+                    inBuffer.notifyAll();
+                }
+                return false;
+            }
+        }
+
+
+        private final ByteBuffer getInBuffer() {
             ensureBuffersExist();
             return inBuffer;
         }
 
 
-        private void ensureBuffersExist() {
-            if (inBuffer != null) {
-                return;
+        final synchronized void insertReplayedBody(ByteChunk body) {
+            inBuffer = ByteBuffer.wrap(body.getBytes(),  body.getOffset(),  body.getLength());
+        }
+
+
+        private final void ensureBuffersExist() {
+            if (inBuffer == null) {
+                // The client must obey Tomcat's window size when sending so
+                // this is the initial window size set by Tomcat that the client
+                // uses (i.e. the local setting is required here).
+                int size = handler.getLocalSettings().getInitialWindowSize();
+                synchronized (this) {
+                    if (inBuffer == null) {
+                        inBuffer = ByteBuffer.allocate(size);
+                        outBuffer = new byte[size];
+                    }
+                }
             }
-            synchronized (this) {
-                if (inBuffer == null) {
-                    inBuffer = ByteBuffer.allocate(16 * 1024);
-                    outBuffer = new byte[16 * 1024];
+        }
+
+
+        private final void receiveReset() {
+            if (inBuffer != null) {
+                synchronized (inBuffer) {
+                    reset = true;
+                    inBuffer.notifyAll();
+                }
+            }
+        }
+
+        private final void notifyEof() {
+            if (inBuffer != null) {
+                synchronized (inBuffer) {
+                    inBuffer.notifyAll();
                 }
             }
         }

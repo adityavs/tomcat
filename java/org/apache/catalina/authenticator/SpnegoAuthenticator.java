@@ -30,7 +30,6 @@ import javax.security.auth.login.LoginContext;
 import javax.security.auth.login.LoginException;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.catalina.Globals;
 import org.apache.catalina.LifecycleException;
 import org.apache.catalina.Realm;
 import org.apache.catalina.connector.Request;
@@ -39,12 +38,12 @@ import org.apache.juli.logging.LogFactory;
 import org.apache.tomcat.util.buf.ByteChunk;
 import org.apache.tomcat.util.buf.MessageBytes;
 import org.apache.tomcat.util.codec.binary.Base64;
+import org.apache.tomcat.util.compat.JreVendor;
 import org.ietf.jgss.GSSContext;
 import org.ietf.jgss.GSSCredential;
 import org.ietf.jgss.GSSException;
 import org.ietf.jgss.GSSManager;
 import org.ietf.jgss.Oid;
-
 
 /**
  * A SPNEGO authenticator that uses the SPNEGO/Kerberos support built in to Java
@@ -56,6 +55,7 @@ import org.ietf.jgss.Oid;
 public class SpnegoAuthenticator extends AuthenticatorBase {
 
     private static final Log log = LogFactory.getLog(SpnegoAuthenticator.class);
+    private static final String AUTH_HEADER_VALUE_NEGOTIATE = "Negotiate";
 
     private String loginConfigName = Constants.DEFAULT_LOGIN_MODULE_NAME;
     public String getLoginConfigName() {
@@ -134,7 +134,7 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
 
 
     @Override
-    public boolean authenticate(Request request, HttpServletResponse response)
+    protected boolean doAuthenticate(Request request, HttpServletResponse response)
             throws IOException {
 
         if (checkForCachedAuthentication(request, response, true)) {
@@ -149,7 +149,7 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
             if (log.isDebugEnabled()) {
                 log.debug(sm.getString("authenticator.noAuthHeader"));
             }
-            response.setHeader("WWW-Authenticate", "Negotiate");
+            response.setHeader(AUTH_HEADER_NAME, AUTH_HEADER_VALUE_NEGOTIATE);
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
             return false;
         }
@@ -162,7 +162,7 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
                 log.debug(sm.getString(
                         "spnegoAuthenticator.authHeaderNotNego"));
             }
-            response.setHeader("WWW-Authenticate", "Negotiate");
+            response.setHeader(AUTH_HEADER_NAME, AUTH_HEADER_VALUE_NEGOTIATE);
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
             return false;
         }
@@ -182,7 +182,7 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
                 log.debug(sm.getString(
                         "spnegoAuthenticator.authHeaderNoToken"));
             }
-            response.setHeader("WWW-Authenticate", "Negotiate");
+            response.setHeader(AUTH_HEADER_NAME, AUTH_HEADER_VALUE_NEGOTIATE);
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
             return false;
         }
@@ -210,7 +210,7 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
             final GSSManager manager = GSSManager.getInstance();
             // IBM JDK only understands indefinite lifetime
             final int credentialLifetime;
-            if (Globals.IS_IBM_JVM) {
+            if (JreVendor.IS_IBM_JVM) {
                 credentialLifetime = GSSCredential.INDEFINITE_LIFETIME;
             } else {
                 credentialLifetime = GSSCredential.DEFAULT_LIFETIME;
@@ -235,7 +235,7 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
                             "spnegoAuthenticator.ticketValidateFail"));
                 }
                 // Start again
-                response.setHeader("WWW-Authenticate", "Negotiate");
+                response.setHeader(AUTH_HEADER_NAME, AUTH_HEADER_VALUE_NEGOTIATE);
                 response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
                 return false;
             }
@@ -247,7 +247,7 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
             if (log.isDebugEnabled()) {
                 log.debug(sm.getString("spnegoAuthenticator.ticketValidateFail"), e);
             }
-            response.setHeader("WWW-Authenticate", "Negotiate");
+            response.setHeader(AUTH_HEADER_NAME, AUTH_HEADER_VALUE_NEGOTIATE);
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
             return false;
         } catch (PrivilegedActionException e) {
@@ -259,7 +259,7 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
             } else {
                 log.error(sm.getString("spnegoAuthenticator.serviceLoginFail"), e);
             }
-            response.setHeader("WWW-Authenticate", "Negotiate");
+            response.setHeader(AUTH_HEADER_NAME, AUTH_HEADER_VALUE_NEGOTIATE);
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
             return false;
         } finally {
@@ -280,7 +280,7 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
         }
 
         // Send response token on success and failure
-        response.setHeader("WWW-Authenticate", "Negotiate "
+        response.setHeader(AUTH_HEADER_NAME, AUTH_HEADER_VALUE_NEGOTIATE + " "
                 + Base64.encodeBase64String(outToken));
 
         if (principal != null) {
@@ -307,13 +307,13 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
     /**
      * This class gets a gss credential via a privileged action.
      */
-    private static class AcceptAction implements PrivilegedExceptionAction<byte[]> {
+    public static class AcceptAction implements PrivilegedExceptionAction<byte[]> {
 
         GSSContext gssContext;
 
         byte[] decoded;
 
-        AcceptAction(GSSContext context, byte[] decodedToken) {
+        public AcceptAction(GSSContext context, byte[] decodedToken) {
             this.gssContext = context;
             this.decoded = decodedToken;
         }
@@ -326,7 +326,7 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
     }
 
 
-    private static class AuthenticateAction implements PrivilegedAction<Principal> {
+    public static class AuthenticateAction implements PrivilegedAction<Principal> {
 
         private final Realm realm;
         private final GSSContext gssContext;
@@ -359,7 +359,7 @@ public class SpnegoAuthenticator extends AuthenticatorBase {
      * This hack works by re-ordering the list of mechTypes in the NegTokenInit
      * token.
      */
-    private static class SpnegoTokenFixer {
+    public static class SpnegoTokenFixer {
 
         public static void fix(byte[] token) {
             SpnegoTokenFixer fixer = new SpnegoTokenFixer(token);

@@ -45,7 +45,7 @@ public class ObjectReader {
     protected long lastAccess = System.currentTimeMillis();
 
     protected boolean accessed = false;
-    private boolean cancelled;
+    private volatile boolean cancelled;
 
     public ObjectReader(int packetSize) {
         this.buffer = new XByteBuffer(packetSize, true);
@@ -82,7 +82,7 @@ public class ObjectReader {
         this.lastAccess = System.currentTimeMillis();
     }
 
-    public boolean isAccessed() {
+    public synchronized boolean isAccessed() {
         return this.accessed;
     }
 
@@ -93,9 +93,8 @@ public class ObjectReader {
      * @param len length in buffer
      * @param count whether to return the count
      * @return number of messages that was sent to callback (or -1 if count == false)
-     * @throws java.io.IOException
      */
-    public int append(ByteBuffer data, int len, boolean count) throws java.io.IOException {
+    public int append(ByteBuffer data, int len, boolean count) {
        buffer.append(data,len);
        int pkgCnt = -1;
        if ( count ) pkgCnt = buffer.countPackages();
@@ -118,9 +117,8 @@ public class ObjectReader {
      * @see XByteBuffer#extractPackage(boolean)
      *
      * @return number of received packages/messages
-     * @throws java.io.IOException
      */
-    public ChannelMessage[] execute() throws java.io.IOException {
+    public ChannelMessage[] execute() {
         int pkgCnt = buffer.countPackages();
         ChannelMessage[] result = new ChannelMessage[pkgCnt];
         for (int i=0; i<pkgCnt; i++)  {
@@ -150,7 +148,7 @@ public class ObjectReader {
         this.buffer = null;
     }
 
-    public long getLastAccess() {
+    public synchronized long getLastAccess() {
         return lastAccess;
     }
 
@@ -158,7 +156,7 @@ public class ObjectReader {
         return cancelled;
     }
 
-    public void setLastAccess(long lastAccess) {
+    public synchronized void setLastAccess(long lastAccess) {
         this.lastAccess = lastAccess;
     }
 

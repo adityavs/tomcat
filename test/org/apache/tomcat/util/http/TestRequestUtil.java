@@ -16,8 +16,7 @@
  */
 package org.apache.tomcat.util.http;
 
-import static org.junit.Assert.assertEquals;
-
+import org.junit.Assert;
 import org.junit.Test;
 
 public class TestRequestUtil {
@@ -87,7 +86,77 @@ public class TestRequestUtil {
         doTestNormalize("..", null);
     }
 
+    @Test
+    public void testNormalize14() {
+        doTestNormalize("//..", null);
+    }
+
+    @Test
+    public void testNormalize15() {
+        doTestNormalize("//../", null);
+    }
+
+    @Test
+    public void testNormalize16() {
+        doTestNormalize("/./..", null);
+    }
+
+    @Test
+    public void testNormalize17() {
+        doTestNormalize("/./../", null);
+    }
+
+    @Test
+    public void testNormalize18() {
+        doTestNormalize("/a/../..", null);
+    }
+
+    @Test
+    public void testNormalize19() {
+        doTestNormalize("/a/../../", null);
+    }
+
+    @Test
+    public void testNormalize20() {
+        doTestNormalize("/a/..", "/");
+    }
+
+    @Test
+    public void testNormalize21() {
+        doTestNormalize("/a/.", "/a");
+    }
+
+    @Test
+    public void testNormalize22() {
+        doTestNormalize("/a/../", "/");
+    }
+
+    @Test
+    public void testNormalize23() {
+        doTestNormalize("/a/./", "/a/");
+    }
+
+    @Test
+    public void testNormalize24() {
+        doTestNormalize("/a/b/..", "/a");
+    }
+
+    @Test
+    public void testNormalize25() {
+        doTestNormalize("/a/b/.", "/a/b");
+    }
+
+    @Test
+    public void testNormalize26() {
+        doTestNormalize("/a/b/../", "/a/");
+    }
+
+    @Test
+    public void testNormalize27() {
+        doTestNormalize("/a/b/./", "/a/b/");
+    }
+
     private void doTestNormalize(String input, String expected) {
-        assertEquals(expected,RequestUtil.normalize(input));
+        Assert.assertEquals(expected,RequestUtil.normalize(input));
     }
 }
