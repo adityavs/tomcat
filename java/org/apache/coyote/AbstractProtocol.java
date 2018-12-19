@@ -22,7 +22,11 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -90,12 +94,11 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
     private final Set<Processor> waitingProcessors =
             Collections.newSetFromMap(new ConcurrentHashMap<Processor, Boolean>());
 
-
     /**
-     * The async timeout thread.
+     * Controller for the async timeout scheduling.
      */
-    private AsyncTimeout asyncTimeout = null;
-
+    private ScheduledFuture<?> asyncTimeoutFuture = null;
+    private ScheduledFuture<?> monitorFuture;
 
     public AbstractProtocol(AbstractEndpoint<S,?> endpoint) {
         this.endpoint = endpoint;
@@ -201,17 +204,21 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
     }
 
 
-    public AsyncTimeout getAsyncTimeout() {
-        return asyncTimeout;
-    }
-
-
     // ---------------------- Properties that are passed through to the EndPoint
 
     @Override
     public Executor getExecutor() { return endpoint.getExecutor(); }
+    @Override
     public void setExecutor(Executor executor) {
         endpoint.setExecutor(executor);
+    }
+
+
+    @Override
+    public ScheduledExecutorService getUtilityExecutor() { return endpoint.getUtilityExecutor(); }
+    @Override
+    public void setUtilityExecutor(ScheduledExecutorService utilityExecutor) {
+        endpoint.setUtilityExecutor(utilityExecutor);
     }
 
 
@@ -277,6 +284,15 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
     }
 
 
+    public int getPortOffset() { return endpoint.getPortOffset(); }
+    public void setPortOffset(int portOffset) {
+        endpoint.setPortOffset(portOffset);
+    }
+
+
+    public int getPortWithOffset() { return endpoint.getPortWithOffset(); }
+
+
     public int getLocalPort() { return endpoint.getLocalPort(); }
 
     /*
@@ -339,7 +355,7 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
             name.append(getAddress().getHostAddress());
             name.append('-');
         }
-        int port = getPort();
+        int port = getPortWithOffset();
         if (port == 0) {
             // Auto binding is in use. Check if port is known
             name.append("auto-");
@@ -489,9 +505,9 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
 
         StringBuilder name = new StringBuilder(getDomain());
         name.append(":type=ProtocolHandler,port=");
-        int port = getPort();
+        int port = getPortWithOffset();
         if (port > 0) {
-            name.append(getPort());
+            name.append(port);
         } else {
             name.append("auto-");
             name.append(getNameIndex());
@@ -517,6 +533,7 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
     public void init() throws Exception {
         if (getLog().isInfoEnabled()) {
             getLog().info(sm.getString("abstractProtocolHandler.init", getName()));
+            logPortOffset();
         }
 
         if (oname == null) {
@@ -545,22 +562,51 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
     public void start() throws Exception {
         if (getLog().isInfoEnabled()) {
             getLog().info(sm.getString("abstractProtocolHandler.start", getName()));
+            logPortOffset();
         }
 
         endpoint.start();
-
-        // Start async timeout thread
-        asyncTimeout = new AsyncTimeout();
-        Thread timeoutThread = new Thread(asyncTimeout, getNameInternal() + "-AsyncTimeout");
-        int priority = endpoint.getThreadPriority();
-        if (priority < Thread.MIN_PRIORITY || priority > Thread.MAX_PRIORITY) {
-            priority = Thread.NORM_PRIORITY;
-        }
-        timeoutThread.setPriority(priority);
-        timeoutThread.setDaemon(true);
-        timeoutThread.start();
+        monitorFuture = getUtilityExecutor().scheduleWithFixedDelay(
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!isPaused()) {
+                            startAsyncTimeout();
+                        }
+                    }
+                }, 0, 60, TimeUnit.SECONDS);
     }
 
+
+    protected void startAsyncTimeout() {
+        if (asyncTimeoutFuture == null || (asyncTimeoutFuture != null && asyncTimeoutFuture.isDone())) {
+            if (asyncTimeoutFuture != null && asyncTimeoutFuture.isDone()) {
+                // There was an error executing the scheduled task, get it and log it
+                try {
+                    asyncTimeoutFuture.get();
+                } catch (InterruptedException | ExecutionException e) {
+                    getLog().error(sm.getString("abstractProtocolHandler.asyncTimeoutError"), e);
+                }
+            }
+            asyncTimeoutFuture = getUtilityExecutor().scheduleAtFixedRate(
+                    new Runnable() {
+                        @Override
+                        public void run() {
+                            long now = System.currentTimeMillis();
+                            for (Processor processor : waitingProcessors) {
+                                processor.timeoutAsync(now);
+                            }
+                        }
+                    }, 1, 1, TimeUnit.SECONDS);
+        }
+    }
+
+    protected void stopAsyncTimeout() {
+        if (asyncTimeoutFuture != null) {
+            asyncTimeoutFuture.cancel(false);
+            asyncTimeoutFuture = null;
+        }
+    }
 
     @Override
     public void pause() throws Exception {
@@ -568,6 +614,7 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
             getLog().info(sm.getString("abstractProtocolHandler.pause", getName()));
         }
 
+        stopAsyncTimeout();
         endpoint.pause();
     }
 
@@ -584,6 +631,7 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
         }
 
         endpoint.resume();
+        startAsyncTimeout();
     }
 
 
@@ -591,10 +639,17 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
     public void stop() throws Exception {
         if(getLog().isInfoEnabled()) {
             getLog().info(sm.getString("abstractProtocolHandler.stop", getName()));
+            logPortOffset();
         }
 
-        if (asyncTimeout != null) {
-            asyncTimeout.stop();
+        if (monitorFuture != null) {
+            monitorFuture.cancel(true);
+            monitorFuture = null;
+        }
+        stopAsyncTimeout();
+        // Timeout any pending async request
+        for (Processor processor : waitingProcessors) {
+            processor.timeoutAsync(-1);
         }
 
         endpoint.stop();
@@ -605,6 +660,7 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
     public void destroy() throws Exception {
         if(getLog().isInfoEnabled()) {
             getLog().info(sm.getString("abstractProtocolHandler.destroy", getName()));
+            logPortOffset();
         }
 
         try {
@@ -627,6 +683,20 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
             if (rgOname != null) {
                 Registry.getRegistry(null, null).unregisterComponent(rgOname);
             }
+        }
+    }
+
+
+    @Override
+    public void closeServerSocketGraceful() {
+        endpoint.closeServerSocketGraceful();
+    }
+
+
+    private void logPortOffset() {
+        if (getPort() != getPortWithOffset()) {
+            getLog().info(sm.getString("abstractProtocolHandler.portOffset", getName(),
+                    String.valueOf(getPort()), String.valueOf(getPortOffset())));
         }
     }
 
@@ -681,6 +751,16 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
             if (getLog().isDebugEnabled()) {
                 getLog().debug(sm.getString("abstractConnectionHandler.connectionsGet",
                         processor, socket));
+            }
+
+            // Async timeouts are calculated on a dedicated thread and then
+            // dispatched. Because of delays in the dispatch process, the
+            // timeout may no longer be required. Check here and avoid
+            // unnecessary processing.
+            if (SocketEvent.TIMEOUT == status && (processor == null ||
+                    !processor.isAsync() || !processor.checkAsyncTimeoutGeneration())) {
+                // This is effectively a NO-OP
+                return SocketState.OPEN;
             }
 
             if (processor != null) {
@@ -1076,52 +1156,4 @@ public abstract class AbstractProtocol<S> implements ProtocolHandler,
         }
     }
 
-
-    /**
-     * Async timeout thread
-     */
-    protected class AsyncTimeout implements Runnable {
-
-        private volatile boolean asyncTimeoutRunning = true;
-
-        /**
-         * The background thread that checks async requests and fires the
-         * timeout if there has been no activity.
-         */
-        @Override
-        public void run() {
-
-            // Loop until we receive a shutdown command
-            while (asyncTimeoutRunning) {
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException e) {
-                    // Ignore
-                }
-                long now = System.currentTimeMillis();
-                for (Processor processor : waitingProcessors) {
-                   processor.timeoutAsync(now);
-                }
-
-                // Loop if endpoint is paused
-                while (endpoint.isPaused() && asyncTimeoutRunning) {
-                    try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException e) {
-                        // Ignore
-                    }
-                }
-            }
-        }
-
-
-        protected void stop() {
-            asyncTimeoutRunning = false;
-
-            // Timeout any pending async request
-            for (Processor processor : waitingProcessors) {
-                processor.timeoutAsync(-1);
-            }
-        }
-    }
 }

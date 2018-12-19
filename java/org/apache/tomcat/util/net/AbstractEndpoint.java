@@ -31,6 +31,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import javax.management.MalformedObjectNameException;
@@ -128,7 +130,7 @@ public abstract class AbstractEndpoint<S,U> {
     }
 
     protected enum BindState {
-        UNBOUND, BOUND_ON_INIT, BOUND_ON_START
+        UNBOUND, BOUND_ON_INIT, BOUND_ON_START, SOCKET_CLOSED_ON_STOP
     }
 
 
@@ -219,7 +221,8 @@ public abstract class AbstractEndpoint<S,U> {
         if (key == null || key.length() == 0) {
             throw new IllegalArgumentException(sm.getString("endpoint.noSslHostName"));
         }
-        if (bindState != BindState.UNBOUND && isSSLEnabled()) {
+        if (bindState != BindState.UNBOUND && bindState != BindState.SOCKET_CLOSED_ON_STOP &&
+                isSSLEnabled()) {
             sslHostConfig.setConfigType(getSslConfigType());
             try {
                 createSSLContext(sslHostConfig);
@@ -448,11 +451,48 @@ public abstract class AbstractEndpoint<S,U> {
 
 
     /**
+     * External Executor based thread pool for utility tasks.
+     */
+    private ScheduledExecutorService utilityExecutor = null;
+    public void setUtilityExecutor(ScheduledExecutorService utilityExecutor) {
+        this.utilityExecutor = utilityExecutor;
+    }
+    public ScheduledExecutorService getUtilityExecutor() {
+        if (utilityExecutor == null) {
+            getLog().warn(sm.getString("endpoint.warn.noUtilityExecutor"));
+            utilityExecutor = new ScheduledThreadPoolExecutor(1);
+        }
+        return utilityExecutor;
+    }
+
+
+    /**
      * Server socket port.
      */
-    private int port;
+    private int port = -1;
     public int getPort() { return port; }
     public void setPort(int port ) { this.port=port; }
+
+
+    private int portOffset = 0;
+    public int getPortOffset() { return portOffset; }
+    public void setPortOffset(int portOffset ) {
+        if (portOffset < 0) {
+            throw new IllegalArgumentException(
+                    sm.getString("endpoint.portOffset.invalid", Integer.valueOf(portOffset)));
+        }
+        this.portOffset = portOffset;
+    }
+
+
+    public int getPortWithOffset() {
+        // Zero is a special case and negative values are invalid
+        int port = getPort();
+        if (port > 0) {
+            return port + getPortOffset();
+        }
+        return port;
+    }
 
 
     public final int getLocalPort() {
@@ -749,7 +789,7 @@ public abstract class AbstractEndpoint<S,U> {
                 return IntrospectionUtils.setProperty(this,name,value,false);
             }
         }catch ( Exception x ) {
-            getLog().error("Unable to set attribute \""+name+"\" to \""+value+"\"",x);
+            getLog().error(sm.getString("endpoint.setAttributeError", name, value), x);
             return false;
         }
     }
@@ -914,14 +954,15 @@ public abstract class AbstractEndpoint<S,U> {
             for (Acceptor<U> acceptor : acceptors) {
                 while (waitLeft > 0 &&
                         acceptor.getState() == AcceptorState.RUNNING) {
-                    Thread.sleep(50);
-                    waitLeft -= 50;
+                    Thread.sleep(5);
+                    waitLeft -= 5;
                 }
             }
         } catch(Throwable t) {
             ExceptionUtils.handleThrowable(t);
             if (getLog().isDebugEnabled()) {
-                getLog().debug(sm.getString("endpoint.debug.unlock.fail", "" + getPort()), t);
+                getLog().debug(sm.getString(
+                        "endpoint.debug.unlock.fail", String.valueOf(getPortWithOffset())), t);
             }
         }
     }
@@ -1038,15 +1079,34 @@ public abstract class AbstractEndpoint<S,U> {
     public abstract void startInternal() throws Exception;
     public abstract void stopInternal() throws Exception;
 
+
+    private void bindWithCleanup() throws Exception {
+        try {
+            bind();
+        } catch (Throwable t) {
+            // Ensure open sockets etc. are cleaned up if something goes
+            // wrong during bind
+            ExceptionUtils.handleThrowable(t);
+            unbind();
+            throw t;
+        }
+    }
+
+
     public final void init() throws Exception {
         if (bindOnInit) {
-            bind();
+            bindWithCleanup();
             bindState = BindState.BOUND_ON_INIT;
         }
         if (this.domain != null) {
             // Register endpoint (as ThreadPool - historical name)
             oname = new ObjectName(domain + ":type=ThreadPool,name=\"" + getName() + "\"");
             Registry.getRegistry(null, null).registerComponent(this, oname, null);
+
+            ObjectName socketPropertiesOname = new ObjectName(domain +
+                    ":type=ThreadPool,name=\"" + getName() + "\",subType=SocketProperties");
+            socketProperties.setObjectName(socketPropertiesOname);
+            Registry.getRegistry(null, null).registerComponent(socketProperties, socketPropertiesOname, null);
 
             for (SSLHostConfig sslHostConfig : findSslHostConfigs()) {
                 registerJmx(sslHostConfig);
@@ -1056,10 +1116,14 @@ public abstract class AbstractEndpoint<S,U> {
 
 
     private void registerJmx(SSLHostConfig sslHostConfig) {
+        if (domain == null) {
+            // Before init the domain is null
+            return;
+        }
         ObjectName sslOname = null;
         try {
-            sslOname = new ObjectName(domain + ":type=SSLHostConfig,ThreadPool=" +
-                    getName() + ",name=" + ObjectName.quote(sslHostConfig.getHostName()));
+            sslOname = new ObjectName(domain + ":type=SSLHostConfig,ThreadPool=\"" +
+                    getName() + "\",name=" + ObjectName.quote(sslHostConfig.getHostName()));
             sslHostConfig.setObjectName(sslOname);
             try {
                 Registry.getRegistry(null, null).registerComponent(sslHostConfig, sslOname, null);
@@ -1075,8 +1139,8 @@ public abstract class AbstractEndpoint<S,U> {
             ObjectName sslCertOname = null;
             try {
                 sslCertOname = new ObjectName(domain +
-                        ":type=SSLHostConfigCertificate,ThreadPool=" + getName() +
-                        ",Host=" + ObjectName.quote(sslHostConfig.getHostName()) +
+                        ":type=SSLHostConfigCertificate,ThreadPool=\"" + getName() +
+                        "\",Host=" + ObjectName.quote(sslHostConfig.getHostName()) +
                         ",name=" + sslHostConfigCert.getType());
                 sslHostConfigCert.setObjectName(sslCertOname);
                 try {
@@ -1104,14 +1168,14 @@ public abstract class AbstractEndpoint<S,U> {
 
     public final void start() throws Exception {
         if (bindState == BindState.UNBOUND) {
-            bind();
+            bindWithCleanup();
             bindState = BindState.BOUND_ON_START;
         }
         startInternal();
     }
 
 
-    protected final void startAcceptorThreads() {
+    protected void startAcceptorThreads() {
         int count = getAcceptorThreadCount();
         acceptors = new ArrayList<>(count);
 
@@ -1153,7 +1217,7 @@ public abstract class AbstractEndpoint<S,U> {
 
     public final void stop() throws Exception {
         stopInternal();
-        if (bindState == BindState.BOUND_ON_START) {
+        if (bindState == BindState.BOUND_ON_START || bindState == BindState.SOCKET_CLOSED_ON_STOP) {
             unbind();
             bindState = BindState.UNBOUND;
         }
@@ -1166,6 +1230,7 @@ public abstract class AbstractEndpoint<S,U> {
         }
         Registry registry = Registry.getRegistry(null, null);
         registry.unregisterComponent(oname);
+        registry.unregisterComponent(socketProperties.getObjectName());
         for (SSLHostConfig sslHostConfig : findSslHostConfigs()) {
             unregisterJmx(sslHostConfig);
         }
@@ -1205,6 +1270,33 @@ public abstract class AbstractEndpoint<S,U> {
             return result;
         } else return -1;
     }
+
+
+    /**
+     * Close the server socket (to prevent further connections) if the server
+     * socket was originally bound on {@link #start()} (rather than on
+     * {@link #init()}).
+     *
+     * @see #getBindOnInit()
+     */
+    public final void closeServerSocketGraceful() {
+        if (bindState == BindState.BOUND_ON_START) {
+            bindState = BindState.SOCKET_CLOSED_ON_STOP;
+            try {
+                doCloseServerSocket();
+            } catch (IOException ioe) {
+                getLog().warn(sm.getString("endpoint.serverSocket.closeFailed", getName()), ioe);
+            }
+        }
+    }
+
+
+    /**
+     * Actually close the server socket but don't perform any other clean-up.
+     *
+     * @throws IOException If an error occurs closing the socket
+     */
+    protected abstract void doCloseServerSocket() throws IOException;
 
     protected abstract U serverSocketAccept() throws Exception;
 

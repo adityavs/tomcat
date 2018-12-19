@@ -30,6 +30,7 @@ import org.apache.catalina.LifecycleState;
 import org.apache.catalina.Service;
 import org.apache.catalina.core.AprLifecycleListener;
 import org.apache.catalina.util.LifecycleMBeanBase;
+import org.apache.coyote.AbstractProtocol;
 import org.apache.coyote.Adapter;
 import org.apache.coyote.ProtocolHandler;
 import org.apache.coyote.UpgradeProtocol;
@@ -143,12 +144,6 @@ public class Connector extends LifecycleMBeanBase  {
      * Is generation of X-Powered-By response header enabled/disabled?
      */
     protected boolean xpoweredBy = false;
-
-
-    /**
-     * The port number on which we listen for requests.
-     */
-    protected int port = -1;
 
 
     /**
@@ -516,7 +511,18 @@ public class Connector extends LifecycleMBeanBase  {
      * when the socket is bound.
      */
     public int getPort() {
-        return this.port;
+        // Try shortcut that should work for nearly all uses first as it does
+        // not use reflection and is therefore faster.
+        if (protocolHandler instanceof AbstractProtocol<?>) {
+            return ((AbstractProtocol<?>) protocolHandler).getPort();
+        }
+        // Fall back for custom protocol handlers not based on AbstractProtocol
+        Object port = getProperty("port");
+        if (port instanceof Integer) {
+            return ((Integer) port).intValue();
+        }
+        // Usually means an invalid protocol has been configured
+        return -1;
     }
 
 
@@ -526,8 +532,38 @@ public class Connector extends LifecycleMBeanBase  {
      * @param port The new port number
      */
     public void setPort(int port) {
-        this.port = port;
         setProperty("port", String.valueOf(port));
+    }
+
+
+    public int getPortOffset() {
+        // Try shortcut that should work for nearly all uses first as it does
+        // not use reflection and is therefore faster.
+        if (protocolHandler instanceof AbstractProtocol<?>) {
+            return ((AbstractProtocol<?>) protocolHandler).getPortOffset();
+        }
+        // Fall back for custom protocol handlers not based on AbstractProtocol
+        Object port = getProperty("portOffset");
+        if (port instanceof Integer) {
+            return ((Integer) port).intValue();
+        }
+        // Usually means an invalid protocol has been configured.
+        return 0;
+    }
+
+
+    public void setPortOffset(int portOffset) {
+        setProperty("portOffset", String.valueOf(portOffset));
+    }
+
+
+    public int getPortWithOffset() {
+        int port = getPort();
+        // Zero is a special case and negative values are invalid
+        if (port > 0) {
+            return port + getPortOffset();
+        }
+        return port;
     }
 
 
@@ -637,6 +673,11 @@ public class Connector extends LifecycleMBeanBase  {
     public void setRedirectPort(int redirectPort) {
         this.redirectPort = redirectPort;
         setProperty("redirectPort", String.valueOf(redirectPort));
+    }
+
+
+    public int getRedirectPortWithOffset() {
+        return getRedirectPort() + getPortOffset();
     }
 
 
@@ -845,7 +886,7 @@ public class Connector extends LifecycleMBeanBase  {
         StringBuilder sb = new StringBuilder("type=");
         sb.append(type);
         sb.append(",port=");
-        int port = getPort();
+        int port = getPortWithOffset();
         if (port > 0) {
             sb.append(port);
         } else {
@@ -907,6 +948,9 @@ public class Connector extends LifecycleMBeanBase  {
         // Initialize adapter
         adapter = new CoyoteAdapter(this);
         protocolHandler.setAdapter(adapter);
+        if (service != null) {
+            protocolHandler.setUtilityExecutor(service.getServer().getUtilityExecutor());
+        }
 
         // Make sure parseBodyMethodsSet has a default
         if (null == parseBodyMethodsSet) {
@@ -946,9 +990,9 @@ public class Connector extends LifecycleMBeanBase  {
     protected void startInternal() throws LifecycleException {
 
         // Validate settings before starting
-        if (getPort() < 0) {
+        if (getPortWithOffset() < 0) {
             throw new LifecycleException(sm.getString(
-                    "coyoteConnector.invalidPort", Integer.valueOf(getPort())));
+                    "coyoteConnector.invalidPort", Integer.valueOf(getPortWithOffset())));
         }
 
         setState(LifecycleState.STARTING);
@@ -1012,7 +1056,7 @@ public class Connector extends LifecycleMBeanBase  {
         StringBuilder sb = new StringBuilder("Connector[");
         sb.append(getProtocol());
         sb.append('-');
-        int port = getPort();
+        int port = getPortWithOffset();
         if (port > 0) {
             sb.append(port);
         } else {

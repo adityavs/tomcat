@@ -50,12 +50,12 @@ import org.apache.tomcat.util.res.StringManager;
 
 public abstract class WsRemoteEndpointImplBase implements RemoteEndpoint {
 
-    private static final StringManager sm =
+    protected static final StringManager sm =
             StringManager.getManager(WsRemoteEndpointImplBase.class);
 
     protected static final SendResult SENDRESULT_OK = new SendResult();
 
-    private final Log log = LogFactory.getLog(WsRemoteEndpointImplBase.class);
+    private final Log log = LogFactory.getLog(WsRemoteEndpointImplBase.class); // must not be static
 
     private final StateMachine stateMachine = new StateMachine();
 

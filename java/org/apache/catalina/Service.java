@@ -151,4 +151,5 @@ public interface Service extends Lifecycle {
      * @return the mapper associated with this Service.
      */
     Mapper getMapper();
+
 }

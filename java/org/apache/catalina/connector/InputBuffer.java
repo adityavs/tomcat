@@ -27,6 +27,7 @@ import java.security.PrivilegedActionException;
 import java.security.PrivilegedExceptionAction;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.servlet.ReadListener;
 
@@ -214,16 +215,22 @@ public class InputBuffer extends Reader
 
 
     public int available() {
+        int available = availableInThisBuffer();
+        if (available == 0) {
+            coyoteRequest.action(ActionCode.AVAILABLE,
+                    Boolean.valueOf(coyoteRequest.getReadListener() != null));
+            available = (coyoteRequest.getAvailable() > 0) ? 1 : 0;
+        }
+        return available;
+    }
+
+
+    private int availableInThisBuffer() {
         int available = 0;
         if (state == BYTE_STATE) {
             available = bb.remaining();
         } else if (state == CHAR_STATE) {
             available = cb.remaining();
-        }
-        if (available == 0) {
-            coyoteRequest.action(ActionCode.AVAILABLE,
-                    Boolean.valueOf(coyoteRequest.getReadListener() != null));
-            available = (coyoteRequest.getAvailable() > 0) ? 1 : 0;
         }
         return available;
     }
@@ -282,11 +289,21 @@ public class InputBuffer extends Reader
             }
             return false;
         }
-        boolean result = available() > 0;
-        if (!result) {
-            coyoteRequest.action(ActionCode.NB_READ_INTEREST, null);
+        // Checking for available data at the network level and registering for
+        // read can be done sequentially for HTTP/1.x and AJP as there is only
+        // ever a single thread processing the socket at any one time. However,
+        // for HTTP/2 there is one thread processing the connection and separate
+        // threads for each stream. For HTTP/2 the two operations have to be
+        // performed atomically else it is possible for the connection thread to
+        // read more data in to the buffer after the stream thread checks for
+        // available network data but before it registers for read.
+        if (availableInThisBuffer() > 0) {
+            return true;
         }
-        return result;
+
+        AtomicBoolean result = new AtomicBoolean();
+        coyoteRequest.action(ActionCode.NB_READ_INTEREST, result);
+        return result.get();
     }
 
 
@@ -351,7 +368,7 @@ public class InputBuffer extends Reader
      * Transfers bytes from the buffer to the specified ByteBuffer. After the
      * operation the position of the ByteBuffer will be returned to the one
      * before the operation, the limit will be the position incremented by
-     * the number of the transfered bytes.
+     * the number of the transferred bytes.
      *
      * @param to the ByteBuffer into which bytes are to be written.
      * @return an integer specifying the actual number of bytes read, or -1 if

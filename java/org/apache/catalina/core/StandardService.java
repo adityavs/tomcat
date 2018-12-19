@@ -85,7 +85,7 @@ public class StandardService extends LifecycleMBeanBase implements Service {
     private final Object connectorsLock = new Object();
 
     /**
-     *
+     * The list of executors held by the service.
      */
     protected final ArrayList<Executor> executors = new ArrayList<>();
 
@@ -203,6 +203,7 @@ public class StandardService extends LifecycleMBeanBase implements Service {
 
 
     // --------------------------------------------------------- Public Methods
+
 
     /**
      * Add a new Connector to the set of defined Connectors, and associate it
@@ -344,7 +345,7 @@ public class StandardService extends LifecycleMBeanBase implements Service {
                     try {
                         ex.start();
                     } catch (LifecycleException x) {
-                        log.error("Executor.start", x);
+                        log.error(sm.getString("standardService.executor.start"), x);
                     }
                 }
             }
@@ -394,7 +395,7 @@ public class StandardService extends LifecycleMBeanBase implements Service {
                 try {
                     ex.stop();
                 } catch (LifecycleException e) {
-                    log.error("Executor.stop", e);
+                    log.error(sm.getString("standardService.executor.stop"), e);
                 }
             }
         }
@@ -458,6 +459,9 @@ public class StandardService extends LifecycleMBeanBase implements Service {
         synchronized (connectorsLock) {
             for (Connector connector: connectors) {
                 connector.pause();
+                // Close server socket if bound on start
+                // Note: test is in AbstractEndpoint
+                connector.getProtocolHandler().closeServerSocketGraceful();
             }
         }
 
@@ -497,6 +501,7 @@ public class StandardService extends LifecycleMBeanBase implements Service {
                 executor.stop();
             }
         }
+
     }
 
 
@@ -610,4 +615,5 @@ public class StandardService extends LifecycleMBeanBase implements Service {
     public final String getObjectNameKeyProperties() {
         return "type=Service";
     }
+
 }

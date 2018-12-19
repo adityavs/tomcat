@@ -22,11 +22,9 @@ import java.beans.PropertyChangeSupport;
 import java.io.File;
 import java.io.FilePermission;
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
 import java.lang.reflect.Constructor;
 import java.net.URL;
 import java.net.URLClassLoader;
-import java.net.URLDecoder;
 
 import javax.management.ObjectName;
 import javax.servlet.ServletContext;
@@ -41,6 +39,7 @@ import org.apache.catalina.util.ToStringUtil;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
 import org.apache.tomcat.util.ExceptionUtils;
+import org.apache.tomcat.util.buf.UDecoder;
 import org.apache.tomcat.util.modeler.Registry;
 import org.apache.tomcat.util.res.StringManager;
 
@@ -63,6 +62,7 @@ import org.apache.tomcat.util.res.StringManager;
 public class WebappLoader extends LifecycleMBeanBase
     implements Loader, PropertyChangeListener {
 
+    private static final Log log = LogFactory.getLog(WebappLoader.class);
 
     // ----------------------------------------------------------- Constructors
 
@@ -378,7 +378,7 @@ public class WebappLoader extends LifecycleMBeanBase
             log.debug(sm.getString("webappLoader.starting"));
 
         if (context.getResources() == null) {
-            log.info("No resources for " + context);
+            log.info(sm.getString("webappLoader.noResources", context));
             setState(LifecycleState.STARTING);
             return;
         }
@@ -410,8 +410,7 @@ public class WebappLoader extends LifecycleMBeanBase
         } catch (Throwable t) {
             t = ExceptionUtils.unwrapInvocationTargetException(t);
             ExceptionUtils.handleThrowable(t);
-            log.error( "LifecycleException ", t );
-            throw new LifecycleException("start: ", t);
+            throw new LifecycleException(sm.getString("webappLoader.startError"), t);
         }
 
         setState(LifecycleState.STARTING);
@@ -456,7 +455,7 @@ public class WebappLoader extends LifecycleMBeanBase
                         context.getParent().getName() + ",context=" + contextName);
                 Registry.getRegistry(null, null).unregisterComponent(cloname);
             } catch (Exception e) {
-                log.error("LifecycleException ", e);
+                log.error(sm.getString("webappLoader.stopError"), e);
             }
         }
 
@@ -602,9 +601,9 @@ public class WebappLoader extends LifecycleMBeanBase
                 for (int i = 0; i < repositories.length; i++) {
                     String repository = repositories[i].toString();
                     if (repository.startsWith("file://"))
-                        repository = utf8Decode(repository.substring(7));
+                        repository = UDecoder.URLDecode(repository.substring(7));
                     else if (repository.startsWith("file:"))
-                        repository = utf8Decode(repository.substring(5));
+                        repository = UDecoder.URLDecode(repository.substring(5));
                     else
                         continue;
                     if (repository == null)
@@ -625,25 +624,11 @@ public class WebappLoader extends LifecycleMBeanBase
             }
             return false;
         } else {
-            log.info( "Unknown loader " + loader + " " + loader.getClass());
+            log.info(sm.getString("webappLoader.unknownClassLoader", loader, loader.getClass()));
             return false;
         }
         return true;
     }
-
-    private String utf8Decode(String input) {
-        String result = null;
-        try {
-            result = URLDecoder.decode(input, "UTF-8");
-        } catch (UnsupportedEncodingException uee) {
-            // Impossible. All JVMs are required to support UTF-8.
-        }
-        return result;
-    }
-
-
-    private static final Log log = LogFactory.getLog(WebappLoader.class);
-
 
     @Override
     protected String getDomainInternal() {

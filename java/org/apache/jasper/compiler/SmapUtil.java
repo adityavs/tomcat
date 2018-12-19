@@ -55,8 +55,6 @@ public class SmapUtil {
 
     private static final Charset SMAP_ENCODING = StandardCharsets.UTF_8;
 
-    private static final Log log = LogFactory.getLog(SmapUtil.class);
-
     //*********************************************************************
     // Public entry points
 
@@ -161,7 +159,7 @@ public class SmapUtil {
     // Installation logic (from Robert Field, JSR-045 spec lead)
     private static class SDEInstaller {
 
-        private final Log log = LogFactory.getLog(SDEInstaller.class);
+        private final Log log = LogFactory.getLog(SDEInstaller.class); // must not be static
 
         static final String nameSDE = "SourceDebugExtension";
 
@@ -179,17 +177,17 @@ public class SmapUtil {
             SDEInstaller installer = new SDEInstaller(classFile, smap);
             installer.install(tmpFile);
             if (!classFile.delete()) {
-                throw new IOException("classFile.delete() failed");
+                throw new IOException(Localizer.getMessage("jsp.error.unable.deleteClassFile"));
             }
             if (!tmpFile.renameTo(classFile)) {
-                throw new IOException("tmpFile.renameTo(classFile) failed");
+                throw new IOException(Localizer.getMessage("jsp.error.unable.renameClassFile"));
             }
         }
 
         SDEInstaller(File inClassFile, byte[] sdeAttr)
             throws IOException {
             if (!inClassFile.exists()) {
-                throw new FileNotFoundException("no such file: " + inClassFile);
+                throw new FileNotFoundException(Localizer.getMessage("jsp.error.noFile", inClassFile));
             }
 
             this.sdeAttr = sdeAttr;
@@ -213,7 +211,8 @@ public class SmapUtil {
             byte[] bytes = new byte[len];
             try (FileInputStream inStream = new FileInputStream(input)) {
                 if (inStream.read(bytes, 0, len) != len) {
-                    throw new IOException("expected size: " + len);
+                    throw new IOException(Localizer.getMessage(
+                            "jsp.error.readContent", Integer.valueOf(len)));
                 }
             }
             return bytes;
@@ -418,7 +417,8 @@ public class SmapUtil {
                         writeBytes(utf8);
                         break;
                     default :
-                        throw new IOException("unexpected tag: " + tag);
+                        throw new IOException(Localizer.getMessage(
+                                "jsp.error.unexpectedTag", Integer.valueOf(tag)));
                 }
             }
             return sdeIndex;
@@ -801,12 +801,14 @@ public class SmapUtil {
                 smap = new String(baos.toByteArray(), encoding);
             }
         } catch (IOException ioe) {
+            Log log = LogFactory.getLog(SmapUtil.class);
             log.warn(Localizer.getMessage("jsp.warning.loadSmap", className), ioe);
         } finally {
             if (is != null) {
                 try {
                     is.close();
                 } catch (IOException ioe) {
+                    Log log = LogFactory.getLog(SmapUtil.class);
                     log.warn(Localizer.getMessage("jsp.warning.loadSmap", className), ioe);
                 }
             }

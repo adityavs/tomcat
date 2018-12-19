@@ -76,6 +76,8 @@ class StreamProcessor extends AbstractProcessor {
                             ConnectionException ce = new ConnectionException(sm.getString(
                                     "streamProcessor.error.connection", stream.getConnectionId(),
                                     stream.getIdentifier()), Http2Error.INTERNAL_ERROR);
+                            // TODO - Temporary debug code
+                            log.info(ce.getMessage(), ce);
                             stream.close(ce);
                         } else if (!getErrorState().isIoAllowed()) {
                             StreamException se = new StreamException(sm.getString(
@@ -86,9 +88,13 @@ class StreamProcessor extends AbstractProcessor {
                         }
                     }
                 } catch (Exception e) {
-                    ConnectionException ce = new ConnectionException(sm.getString(
-                            "streamProcessor.error.connection", stream.getConnectionId(),
-                            stream.getIdentifier()), Http2Error.INTERNAL_ERROR);
+                    String msg = sm.getString("streamProcessor.error.connection",
+                            stream.getConnectionId(), stream.getIdentifier());
+                    // TODO - Temporary debug code
+                    //if (log.isDebugEnabled()) {
+                        log.info(msg, e);
+                    //}
+                    ConnectionException ce = new ConnectionException(msg, Http2Error.INTERNAL_ERROR);
                     ce.initCause(e);
                     stream.close(ce);
                 } finally {
@@ -148,6 +154,13 @@ class StreamProcessor extends AbstractProcessor {
             if (contentLanguage != null) {
                 headers.setValue("content-language").setString(contentLanguage);
             }
+        }
+
+        // Add a content-length header if a content length has been set unless
+        // the application has already added one
+        long contentLength = coyoteResponse.getContentLengthLong();
+        if (contentLength != -1 && headers.getValue("content-length") == null) {
+            headers.addValue("content-length").setLong(contentLength);
         }
 
         // Add date header unless it is an informational response or the
@@ -235,6 +248,12 @@ class StreamProcessor extends AbstractProcessor {
 
 
     @Override
+    protected final boolean isReadyForRead() {
+        return stream.getInputBuffer().isReadyForRead();
+    }
+
+
+    @Override
     protected final boolean isRequestBodyFullyRead() {
         return stream.getInputBuffer().isRequestBodyFullyRead();
     }
@@ -242,28 +261,40 @@ class StreamProcessor extends AbstractProcessor {
 
     @Override
     protected final void registerReadInterest() {
-        stream.getInputBuffer().registerReadInterest();
+        // Should never be called for StreamProcessor as isReadyForRead() is
+        // overridden
+        throw new UnsupportedOperationException();
     }
 
 
     @Override
-    protected final boolean isReady() {
-        return stream.isReady();
+    protected final boolean isReadyForWrite() {
+        return stream.isReadyForWrite();
     }
 
 
     @Override
     protected final void executeDispatches() {
         Iterator<DispatchType> dispatches = getIteratorAndClearDispatches();
-        synchronized (this) {
+        /*
+         * Compare with superclass that uses SocketWrapper
+         * A sync is not necessary here as the window sizes are updated with
+         * syncs before the dispatches are executed and it is the window size
+         * updates that need to be complete before the dispatch executes.
+         */
+        while (dispatches != null && dispatches.hasNext()) {
+            DispatchType dispatchType = dispatches.next();
             /*
-             * TODO Check if this sync is necessary.
-             *      Compare with superclass that uses SocketWrapper
+             * Dispatch on new thread.
+             * Firstly, this avoids a deadlock on the SocketWrapper as Streams
+             * being processed by container threads lock the SocketProcessor
+             * before they lock the SocketWrapper which is the opposite order to
+             * container threads processing via Http2UpgrageHandler.
+             * Secondly, this code executes after a Window update has released
+             * one or more Streams. By dispatching each Stream to a dedicated
+             * thread, those Streams may progress concurrently.
              */
-            while (dispatches != null && dispatches.hasNext()) {
-                DispatchType dispatchType = dispatches.next();
-                processSocketEvent(dispatchType.getSocketStatus(), false);
-            }
+            processSocketEvent(dispatchType.getSocketStatus(), true);
         }
     }
 
@@ -348,6 +379,10 @@ class StreamProcessor extends AbstractProcessor {
 
     @Override
     protected final boolean flushBufferedWrite() throws IOException {
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("streamProcessor.flushBufferedWrite.entry",
+                    stream.getConnectionId(), stream.getIdentifier()));
+        }
         if (stream.flush(false)) {
             // The buffer wasn't fully flushed so re-register the
             // stream for write. Note this does not go via the
@@ -356,7 +391,7 @@ class StreamProcessor extends AbstractProcessor {
             // has been emptied then the code below will call
             // dispatch() which will enable the
             // Response to respond to this event.
-            if (stream.isReady()) {
+            if (stream.isReadyForWrite()) {
                 // Unexpected
                 throw new IllegalStateException();
             }

@@ -76,7 +76,7 @@ public class Membership implements Cloneable {
             final HashMap<Member, MbrEntry> tmpclone = (HashMap<Member, MbrEntry>) map.clone();
             clone.map = tmpclone;
 
-            // Standard clone() method will copy the array obejct. Replace that
+            // Standard clone() method will copy the array object. Replace that
             // with a new array but with the same contents.
             clone.members = members.clone();
 
@@ -343,8 +343,7 @@ public class Membership implements Cloneable {
          *         <code>false</code>
          */
         public boolean hasExpired(long maxtime) {
-            long delta = System.currentTimeMillis() - lastHeardFrom;
-            return delta > maxtime;
+            return !mbr.isLocal() && (System.currentTimeMillis() - lastHeardFrom) > maxtime;
         }
     }
 }

@@ -189,7 +189,7 @@ public class TestByteChunk {
     }
 
 
-    public class Sink implements ByteOutputChannel {
+    public static class Sink implements ByteOutputChannel {
 
         @Override
         public void realWriteBytes(byte[] cbuf, int off, int len) throws IOException {
@@ -200,5 +200,19 @@ public class TestByteChunk {
         public void realWriteBytes(ByteBuffer from) throws IOException {
             // NO-OP
         }
+    }
+
+
+    @Test
+    public void testToString() {
+        ByteChunk bc = new ByteChunk();
+        Assert.assertNull(bc.toString());
+        byte[] data = new byte[8];
+        bc.setBytes(data, 0, data.length);
+        Assert.assertNotNull(bc.toString());
+        bc.recycle();
+        // toString() should behave consistently for new ByteChunk and
+        // immediately after a call to recycle().
+        Assert.assertNull(bc.toString());
     }
 }

@@ -164,7 +164,7 @@ public class JAASRealm extends RealmBase {
      */
     protected String configFile;
 
-    protected Configuration jaasConfiguration;
+    protected volatile Configuration jaasConfiguration;
     protected volatile boolean jaasConfigurationLoaded = false;
 
 
@@ -208,8 +208,7 @@ public class JAASRealm extends RealmBase {
      * @param useContext True means use context ClassLoader
      */
     public void setUseContextClassLoader(boolean useContext) {
-      useContextClassLoader = useContext;
-      log.info("Setting useContextClassLoader = " + useContext);
+        useContextClassLoader = useContext;
     }
 
     /**
@@ -226,16 +225,9 @@ public class JAASRealm extends RealmBase {
     public void setContainer(Container container) {
         super.setContainer(container);
 
-        if( appName==null  ) {
-            String name = container.getName();
-            if (!name.startsWith("/")) {
-                name = "/" + name;
-            }
-            name = makeLegalForJAAS(name);
-
-            appName=name;
-
-            log.info("Set JAAS app name " + appName);
+        if (appName == null) {
+            appName = makeLegalForJAAS(container.getName());
+            log.info(sm.getString("jaasRealm.appName", appName));
         }
     }
 
@@ -286,11 +278,10 @@ public class JAASRealm extends RealmBase {
                  if (Principal.class.isAssignableFrom(principalClass)) {
                      classNamesList.add(classNames[i]);
                  } else {
-                     log.error("Class "+classNames[i]+" is not implementing "+
-                               "java.security.Principal! Class not added.");
+                     log.error(sm.getString("jaasRealm.notPrincipal", classNames[i]));
                  }
              } catch (ClassNotFoundException e) {
-                 log.error("Class "+classNames[i]+" not found! Class not added.");
+                 log.error(sm.getString("jaasRealm.classNotFound", classNames[i]));
              }
          }
      }
@@ -451,7 +442,7 @@ public class JAASRealm extends RealmBase {
             return null;
         }
         if (log.isDebugEnabled()) {
-            log.debug(sm.getString("jaasRealm.authenticateSuccess", username));
+            log.debug(sm.getString("jaasRealm.authenticateSuccess", username, principal));
         }
 
         return principal;
@@ -538,6 +529,7 @@ public class JAASRealm extends RealmBase {
                 log.debug(sm.getString("jaasRealm.userPrincipalFailure"));
                 log.debug(sm.getString("jaasRealm.rolePrincipalFailure"));
             }
+            return null;
         } else {
             if (roles.size() == 0) {
                 if (log.isDebugEnabled()) {
@@ -606,6 +598,8 @@ public class JAASRealm extends RealmBase {
      * @return the loaded configuration
      */
     protected Configuration getConfig() {
+        // Local copy to avoid possible NPE due to concurrent change
+        String configFile = this.configFile;
         try {
             if (jaasConfigurationLoaded) {
                 return jaasConfiguration;
@@ -615,8 +609,7 @@ public class JAASRealm extends RealmBase {
                     jaasConfigurationLoaded = true;
                     return null;
                 }
-                URL resource = Thread.currentThread().getContextClassLoader().
-                        getResource(configFile);
+                URL resource = Thread.currentThread().getContextClassLoader().getResource(configFile);
                 URI uri = resource.toURI();
                 @SuppressWarnings("unchecked")
                 Class<Configuration> sunConfigFile = (Class<Configuration>)

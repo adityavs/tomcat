@@ -149,6 +149,9 @@ public class StandardEngine extends ContainerBase implements Engine {
         } else {
             this.defaultHost = host.toLowerCase(Locale.ENGLISH);
         }
+        if (getState().isAvailable()) {
+            service.getMapper().setDefaultHostName(host);
+        }
         support.firePropertyChange("defaultHost", oldDefaultHost,
                                    this.defaultHost);
 
@@ -251,8 +254,9 @@ public class StandardEngine extends ContainerBase implements Engine {
     protected synchronized void startInternal() throws LifecycleException {
 
         // Log our server identification information
-        if(log.isInfoEnabled())
-            log.info( "Starting Servlet Engine: " + ServerInfo.getServerInfo());
+        if (log.isInfoEnabled()) {
+            log.info(sm.getString("standardEngine.start", ServerInfo.getServerInfo()));
+        }
 
         // Standard container startup
         super.startInternal();

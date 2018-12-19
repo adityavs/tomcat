@@ -17,9 +17,16 @@
 package org.apache.catalina.startup;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.MalformedURLException;
+import java.net.URI;
 import java.net.URL;
+import java.net.URLConnection;
 import java.security.Principal;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -60,9 +67,13 @@ import org.apache.catalina.core.StandardService;
 import org.apache.catalina.core.StandardWrapper;
 import org.apache.catalina.realm.GenericPrincipal;
 import org.apache.catalina.realm.RealmBase;
+import org.apache.catalina.util.ContextName;
+import org.apache.catalina.util.IOTools;
 import org.apache.tomcat.util.ExceptionUtils;
 import org.apache.tomcat.util.buf.UriUtil;
 import org.apache.tomcat.util.descriptor.web.LoginConfig;
+import org.apache.tomcat.util.file.ConfigFileLoader;
+import org.apache.tomcat.util.file.ConfigurationSource;
 import org.apache.tomcat.util.res.StringManager;
 
 // TODO: lazy init for the temp dir - only when a JSP is compiled or
@@ -134,7 +145,7 @@ import org.apache.tomcat.util.res.StringManager;
  * see setters for doc. It can be used for simple tests and
  * demo.
  *
- * @see <a href="http://svn.apache.org/repos/asf/tomcat/trunk/test/org/apache/catalina/startup/TestTomcat.java">TestTomcat</a>
+ * @see <a href="https://svn.apache.org/repos/asf/tomcat/trunk/test/org/apache/catalina/startup/TestTomcat.java">TestTomcat</a>
  * @author Costin Manolache
  */
 public class Tomcat {
@@ -157,6 +168,8 @@ public class Tomcat {
     private final Map<String, String> userPass = new HashMap<>();
     private final Map<String, List<String>> userRoles = new HashMap<>();
     private final Map<String, Principal> userPrincipals = new HashMap<>();
+
+    private boolean addDefaultWebXmlToWebapp = true;
 
     public Tomcat() {
         ExceptionUtils.preload();
@@ -218,10 +231,60 @@ public class Tomcat {
      * @param docBase Base directory for the context, for static files.
      *  Must exist, relative to the server home
      * @return the deployed context
-     * @throws ServletException if a deployment error occurs
      */
-    public Context addWebapp(String contextPath, String docBase) throws ServletException {
+    public Context addWebapp(String contextPath, String docBase) {
         return addWebapp(getHost(), contextPath, docBase);
+    }
+
+
+    /**
+     * Copy the specified WAR file to the Host's appBase and then call
+     * {@link #addWebapp(String, String)} with the newly copied WAR. The WAR
+     * will <b>NOT</b> be removed from the Host's appBase when the Tomcat
+     * instance stops. Note that {@link ExpandWar} provides utility methods that
+     * may be used to delete the WAR and/or expanded directory if required.
+     *
+     * @param contextPath   The context mapping to use, "" for root context.
+     * @param source        The location from which the WAR should be copied
+     *
+     * @return The deployed Context
+     *
+     * @throws IOException If an I/O error occurs while copying the WAR file
+     *                     from the specified URL to the appBase
+     */
+    public Context addWebapp(String contextPath, URL source) throws IOException {
+
+        ContextName cn = new ContextName(contextPath, null);
+
+        // Make sure a conflicting web application has not already been deployed
+        Host h = getHost();
+        if (h.findChild(cn.getName()) != null) {
+            throw new IllegalArgumentException(sm.getString("tomcat.addWebapp.conflictChild",
+                    source, contextPath, cn.getName()));
+        }
+
+        // Make sure appBase does not contain a conflicting web application
+        File targetWar = new File(h.getAppBaseFile(), cn.getBaseName() + ".war");
+        File targetDir = new File(h.getAppBaseFile(), cn.getBaseName());
+
+        if (targetWar.exists()) {
+            throw new IllegalArgumentException(sm.getString("tomcat.addWebapp.conflictFile",
+                    source, contextPath, targetWar.getAbsolutePath()));
+        }
+        if (targetDir.exists()) {
+            throw new IllegalArgumentException(sm.getString("tomcat.addWebapp.conflictFile",
+                    source, contextPath, targetDir.getAbsolutePath()));
+        }
+
+        // Should be good to copy the WAR now
+        URLConnection uConn = source.openConnection();
+
+        try (InputStream is = uConn.getInputStream();
+                OutputStream os = new FileOutputStream(targetWar)) {
+            IOTools.flow(is, os);
+        }
+
+        return addWebapp(contextPath, targetWar.getAbsolutePath());
     }
 
 
@@ -347,6 +410,27 @@ public class Tomcat {
         ctx.addChild(sw);
 
         return sw;
+    }
+
+
+    /**
+     * Initialize the server given the specified configuration source.
+     * The server will be loaded according to the Tomcat configuration
+     * files contained in the source (server.xml, web.xml, context.xml,
+     * SSL certificates, etc).
+     * If no configuration source is specified, it will use the default
+     * locations for these files.
+     * @param source The configuration source
+     */
+    public void init(ConfigurationSource source) {
+        ConfigFileLoader.setSource(source);
+        addDefaultWebXmlToWebapp = false;
+        Catalina catalina = new Catalina();
+        // Load the Catalina instance with the regular configuration files
+        // from specified source
+        catalina.load();
+        // Retrieve and set the server
+        server = catalina.getServer();
     }
 
 
@@ -539,6 +623,9 @@ public class Tomcat {
 
         initBaseDir();
 
+        // Set configuration source
+        ConfigFileLoader.setSource(new CatalinaBaseConfigurationSource(new File(basedir), null));
+
         server.setPort( -1 );
 
         Service service = new StandardService();
@@ -604,7 +691,7 @@ public class Tomcat {
             throw new IllegalArgumentException(e);
         }
 
-        return addWebapp(host,  contextPath, docBase, listener);
+        return addWebapp(host, contextPath, docBase, listener);
     }
 
     /**
@@ -624,12 +711,15 @@ public class Tomcat {
         Context ctx = createContext(host, contextPath);
         ctx.setPath(contextPath);
         ctx.setDocBase(docBase);
-        ctx.addLifecycleListener(getDefaultWebXmlListener());
+
+        if (addDefaultWebXmlToWebapp)
+            ctx.addLifecycleListener(getDefaultWebXmlListener());
+
         ctx.setConfigFile(getWebappConfigFile(docBase, contextPath));
 
         ctx.addLifecycleListener(config);
 
-        if (config instanceof ContextConfig) {
+        if (addDefaultWebXmlToWebapp && (config instanceof ContextConfig)) {
             // prevent it from looking ( if it finds one - it'll have dup error )
             ((ContextConfig) config).setDefaultWebXml(noDefaultWebXmlPath());
         }
@@ -804,6 +894,24 @@ public class Tomcat {
     }
 
 
+    /**
+     * By default, when calling addWebapp() to create a Context, the settings from
+     * from the default web.xml are added to the context.  Calling this method with
+     * a <code>false</code> value prior to calling addWebapp() allows to opt out of
+     * the default settings. In that event you will need to add the configurations
+     * yourself,  either programmatically or by using web.xml deployment descriptors.
+     * @param addDefaultWebXmlToWebapp <code>false</code> will prevent the class from
+     *                                 automatically adding the default settings when
+     *                                 calling addWebapp().
+     *                                 <code>true</code> will add the default settings
+     *                                 and is the default behavior.
+     * @see #addWebapp(Host, String, String, LifecycleListener)
+     */
+    public void setAddDefaultWebXmlToWebapp(boolean addDefaultWebXmlToWebapp){
+        this.addDefaultWebXmlToWebapp = addDefaultWebXmlToWebapp;
+    }
+
+
     /*
      * Uses essentially the same logic as {@link ContainerBase#logName()}.
      */
@@ -856,10 +964,7 @@ public class Tomcat {
             return (Context) Class.forName(contextClass).getConstructor()
                     .newInstance();
         } catch (ReflectiveOperationException  | IllegalArgumentException | SecurityException e) {
-            throw new IllegalArgumentException(
-                    "Can't instantiate context-class " + contextClass
-                            + " for host " + host + " and url "
-                            + url, e);
+            throw new IllegalArgumentException(sm.getString("tomcat.noContextClass", contextClass, host, url), e);
         }
     }
 
@@ -966,18 +1071,20 @@ public class Tomcat {
                 Context context = (Context) event.getLifecycle();
                 if (event.getType().equals(Lifecycle.CONFIGURE_START_EVENT)) {
                     context.setConfigured(true);
-                }
-                // LoginConfig is required to process @ServletSecurity
-                // annotations
-                if (context.getLoginConfig() == null) {
-                    context.setLoginConfig(
-                            new LoginConfig("NONE", null, null, null));
-                    context.getPipeline().addValve(new NonLoginAuthenticator());
+
+                    // Process annotations
+                    WebAnnotationSet.loadApplicationAnnotations(context);
+
+                    // LoginConfig is required to process @ServletSecurity
+                    // annotations
+                    if (context.getLoginConfig() == null) {
+                        context.setLoginConfig(new LoginConfig("NONE", null, null, null));
+                        context.getPipeline().addValve(new NonLoginAuthenticator());
+                    }
                 }
             } catch (ClassCastException e) {
             }
         }
-
     }
 
 
@@ -1245,7 +1352,7 @@ public class Tomcat {
         if (docBase.isDirectory()) {
             return getWebappConfigFileFromDirectory(docBase, contextName);
         } else {
-            return getWebappConfigFileFromJar(docBase, contextName);
+            return getWebappConfigFileFromWar(docBase, contextName);
         }
     }
 
@@ -1257,13 +1364,13 @@ public class Tomcat {
                 result = webAppContextXml.toURI().toURL();
             } catch (MalformedURLException e) {
                 Logger.getLogger(getLoggerName(getHost(), contextName)).log(Level.WARNING,
-                        "Unable to determine web application context.xml " + docBase, e);
+                        sm.getString("tomcat.noContextXml", docBase), e);
             }
         }
         return result;
     }
 
-    private URL getWebappConfigFileFromJar(File docBase, String contextName) {
+    private URL getWebappConfigFileFromWar(File docBase, String contextName) {
         URL result = null;
         try (JarFile jar = new JarFile(docBase)) {
             JarEntry entry = jar.getJarEntry(Constants.ApplicationContextXml);
@@ -1272,8 +1379,73 @@ public class Tomcat {
             }
         } catch (IOException e) {
             Logger.getLogger(getLoggerName(getHost(), contextName)).log(Level.WARNING,
-                    "Unable to determine web application context.xml " + docBase, e);
+                    sm.getString("tomcat.noContextXml", docBase), e);
         }
         return result;
     }
+
+    /**
+     * Main executable method for use with a Maven packager.
+     * @param args the command line arguments
+     * @throws Exception if an error occurs
+     */
+    public static void main(String[] args) throws Exception {
+        org.apache.catalina.startup.Tomcat tomcat = new org.apache.catalina.startup.Tomcat();
+        // Create a Catalina instance and let it parse the configuration files
+        // It will also set a shutdown hook to stop the Server when needed
+        tomcat.init(new ConfigurationSource() {
+            protected final File userDir = new File(System.getProperty("user.dir"));
+            protected final URI userDirUri = userDir.toURI();
+            @Override
+            public Resource getResource(String name) throws IOException {
+                File f = new File(name);
+                if (!f.isAbsolute()) {
+                    f = new File(userDir, name);
+                }
+                if (f.isFile()) {
+                    return new Resource(new FileInputStream(f), f.toURI());
+                } else {
+                    throw new FileNotFoundException(name);
+                }
+            }
+            @Override
+            public URI getURI(String name) {
+                File f = new File(name);
+                if (!f.isAbsolute()) {
+                    f = new File(userDir, name);
+                }
+                if (f.isFile()) {
+                    return f.toURI();
+                }
+                return userDirUri.resolve(name);
+            }
+        });
+        boolean await = false;
+        String path = "";
+        // Process command line parameters
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].equals("--war")) {
+                if (++i >= args.length) {
+                    throw new IllegalArgumentException(sm.getString("tomcat.invalidCommandLine", args[i - 1]));
+                }
+                File war = new File(args[i]);
+                tomcat.addWebapp(path, war.getAbsolutePath());
+            } else if (args[i].equals("--path")) {
+                if (++i >= args.length) {
+                    throw new IllegalArgumentException(sm.getString("tomcat.invalidCommandLine", args[i - 1]));
+                }
+                path = args[i];
+            } else if (args[i].equals("--await")) {
+                await = true;
+            } else {
+                throw new IllegalArgumentException(sm.getString("tomcat.invalidCommandLine", args[i]));
+            }
+        }
+        tomcat.start();
+        // Ideally the utility threads are non daemon
+        if (await) {
+            tomcat.getServer().await();
+        }
+    }
+
 }

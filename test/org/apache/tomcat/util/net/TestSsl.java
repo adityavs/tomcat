@@ -109,7 +109,15 @@ public class TestSsl extends TomcatBaseTest {
 
         tomcat.start();
 
-        SSLContext sslCtx = SSLContext.getInstance("TLS");
+        SSLContext sslCtx;
+        if (TesterSupport.isDefaultTLSProtocolForTesting13(tomcat.getConnector())) {
+            // Force TLS 1.2 if TLS 1.3 is available as JSSE's TLS 1.3
+            // implementation doesn't support Post Handshake Authentication
+            // which is required for this test to pass.
+            sslCtx = SSLContext.getInstance(Constants.SSL_PROTO_TLSv1_2);
+        } else {
+            sslCtx = SSLContext.getInstance(Constants.SSL_PROTO_TLS);
+        }
         sslCtx.init(null, TesterSupport.getTrustManagers(), null);
         SSLSocketFactory socketFactory = sslCtx.getSocketFactory();
         SSLSocket socket = (SSLSocket) socketFactory.createSocket("localhost",

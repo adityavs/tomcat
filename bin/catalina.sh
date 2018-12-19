@@ -33,6 +33,14 @@
 #                   will be redirected.
 #                   Default is $CATALINA_BASE/logs/catalina.out
 #
+#   CATALINA_OUT_CMD (Optional) Command which will be executed and receive
+#                   as its stdin the stdout and stderr from the Tomcat java
+#                   process. If CATALINA_OUT_CMD is set, the value of
+#                   CATALINA_OUT will be ignored.
+#                   No default.
+#                   Example (all one line)
+#                   CATALINA_OUT_CMD="cronolog $CATALINA_BASE/logs/catalina.%Y-%m-%d.out >/dev/null 2>&1"
+#
 #   CATALINA_OPTS   (Optional) Java runtime options used when the "start",
 #                   "run" or "debug" command is executed.
 #                   Include here and not in JAVA_OPTS all options, that should
@@ -240,7 +248,7 @@ if $cygwin; then
   CATALINA_BASE=`cygpath --absolute --windows "$CATALINA_BASE"`
   CATALINA_TMPDIR=`cygpath --absolute --windows "$CATALINA_TMPDIR"`
   CLASSPATH=`cygpath --path --windows "$CLASSPATH"`
-  JAVA_ENDORSED_DIRS=`cygpath --path --windows "$JAVA_ENDORSED_DIRS"`
+  [ -n "$JAVA_ENDORSED_DIRS" ] && JAVA_ENDORSED_DIRS=`cygpath --path --windows "$JAVA_ENDORSED_DIRS"`
 fi
 
 if [ -z "$JSSE_OPTS" ] ; then
@@ -284,9 +292,8 @@ if [ -d "$CATALINA_HOME/endorsed" ]; then
     ENDORSED_PROP=java.endorsed.dirs
 fi
 
-# Uncomment the following line to make the umask available when using the
-# org.apache.catalina.security.SecurityListener
-#JAVA_OPTS="$JAVA_OPTS -Dorg.apache.catalina.security.SecurityListener.UMASK=`umask`"
+# Make the umask available when using the org.apache.catalina.security.SecurityListener
+JAVA_OPTS="$JAVA_OPTS -Dorg.apache.catalina.security.SecurityListener.UMASK=`umask`"
 
 if [ -z "$USE_NOHUP" ]; then
     if $hpux; then
@@ -297,11 +304,12 @@ if [ -z "$USE_NOHUP" ]; then
 fi
 unset _NOHUP
 if [ "$USE_NOHUP" = "true" ]; then
-    _NOHUP=nohup
+    _NOHUP="nohup"
 fi
 
 # Add the JAVA 9 specific start-up parameters required by Tomcat
 JDK_JAVA_OPTIONS="$JDK_JAVA_OPTIONS --add-opens=java.base/java.lang=ALL-UNNAMED"
+JDK_JAVA_OPTIONS="$JDK_JAVA_OPTIONS --add-opens=java.base/java.io=ALL-UNNAMED"
 JDK_JAVA_OPTIONS="$JDK_JAVA_OPTIONS --add-opens=java.rmi/sun.rmi.transport=ALL-UNNAMED"
 export JDK_JAVA_OPTIONS
 
@@ -443,13 +451,23 @@ elif [ "$1" = "start" ] ; then
   fi
 
   shift
-  touch "$CATALINA_OUT"
+  if [ -z "$CATALINA_OUT_CMD" ] ; then
+    touch "$CATALINA_OUT"
+    catalina_out_command=">> \"$CATALINA_OUT\" 2>&1"
+  else
+    catalina_out_command="| $CATALINA_OUT_CMD"
+  fi
+  if [ ! -z "$CATALINA_PID" ]; then
+    catalina_pid_file="$CATALINA_PID"
+  else
+    catalina_pid_file=/dev/null
+  fi
   if [ "$1" = "-security" ] ; then
     if [ $have_tty -eq 1 ]; then
       echo "Using Security Manager"
     fi
     shift
-    eval $_NOHUP "\"$_RUNJAVA\"" "\"$LOGGING_CONFIG\"" $LOGGING_MANAGER $JAVA_OPTS $CATALINA_OPTS \
+    eval \{ $_NOHUP "\"$_RUNJAVA\"" "\"$LOGGING_CONFIG\"" $LOGGING_MANAGER $JAVA_OPTS $CATALINA_OPTS \
       -D$ENDORSED_PROP="\"$JAVA_ENDORSED_DIRS\"" \
       -classpath "\"$CLASSPATH\"" \
       -Djava.security.manager \
@@ -458,22 +476,18 @@ elif [ "$1" = "start" ] ; then
       -Dcatalina.home="\"$CATALINA_HOME\"" \
       -Djava.io.tmpdir="\"$CATALINA_TMPDIR\"" \
       org.apache.catalina.startup.Bootstrap "$@" start \
-      >> "$CATALINA_OUT" 2>&1 "&"
+      2\>\&1 \& echo \$! \>\"$catalina_pid_file\" \; \} $catalina_out_command "&"
 
   else
-    eval $_NOHUP "\"$_RUNJAVA\"" "\"$LOGGING_CONFIG\"" $LOGGING_MANAGER $JAVA_OPTS $CATALINA_OPTS \
+    eval \{ $_NOHUP "\"$_RUNJAVA\"" "\"$LOGGING_CONFIG\"" $LOGGING_MANAGER $JAVA_OPTS $CATALINA_OPTS \
       -D$ENDORSED_PROP="\"$JAVA_ENDORSED_DIRS\"" \
       -classpath "\"$CLASSPATH\"" \
       -Dcatalina.base="\"$CATALINA_BASE\"" \
       -Dcatalina.home="\"$CATALINA_HOME\"" \
       -Djava.io.tmpdir="\"$CATALINA_TMPDIR\"" \
       org.apache.catalina.startup.Bootstrap "$@" start \
-      >> "$CATALINA_OUT" 2>&1 "&"
+      2\>\&1 \& echo \$! \>\"$catalina_pid_file\" \; \} $catalina_out_command "&"
 
-  fi
-
-  if [ ! -z "$CATALINA_PID" ]; then
-    echo $! > "$CATALINA_PID"
   fi
 
   echo "Tomcat started."
@@ -502,7 +516,7 @@ elif [ "$1" = "stop" ] ; then
       if [ -s "$CATALINA_PID" ]; then
         kill -0 `cat "$CATALINA_PID"` >/dev/null 2>&1
         if [ $? -gt 0 ]; then
-          echo "PID file found but no matching process was found. Stop aborted."
+          echo "PID file found but either no matching process was found or the current user does not have permission to stop the process. Stop aborted."
           exit 1
         fi
       else

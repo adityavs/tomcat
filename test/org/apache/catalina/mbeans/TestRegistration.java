@@ -72,6 +72,7 @@ public class TestRegistration extends TomcatBaseTest {
             "Tomcat:type=Server",
             "Tomcat:type=Service",
             "Tomcat:type=StringCache",
+            "Tomcat:type=UtilityExecutor",
             "Tomcat:type=Valve,name=StandardEngineValve",
         };
     }
@@ -134,6 +135,9 @@ public class TestRegistration extends TomcatBaseTest {
                 + ObjectName.quote(ADDRESS),
         "Tomcat:type=ThreadPool,name="
                 + ObjectName.quote("http-" + type + "-" + ADDRESS + "-" + port),
+        "Tomcat:type=ThreadPool,name="
+                + ObjectName.quote("http-" + type + "-" + ADDRESS + "-" + port) +
+                ",subType=SocketProperties",
         };
     }
 

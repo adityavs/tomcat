@@ -47,7 +47,7 @@ import org.apache.juli.logging.LogFactory;
 /**
  * <p>
  * ExpiresFilter is a Java Servlet API port of <a
- * href="http://httpd.apache.org/docs/2.2/mod/mod_expires.html">Apache
+ * href="https://httpd.apache.org/docs/2.2/mod/mod_expires.html">Apache
  * mod_expires</a> to add '{@code Expires}' and
  * '{@code Cache-Control: max-age=}' headers to HTTP response according to its
  * '{@code Content-Type}'.
@@ -55,7 +55,7 @@ import org.apache.juli.logging.LogFactory;
  *
  * <p>
  * Following documentation is inspired by <a
- * href="http://httpd.apache.org/docs/2.2/mod/mod_expires.html">mod_expires</a>
+ * href="https://httpd.apache.org/docs/2.2/mod/mod_expires.html">mod_expires</a>
  * </p>
  * <h1>Summary</h1>
  * <p>
@@ -75,7 +75,7 @@ import org.apache.juli.logging.LogFactory;
  * To modify {@code Cache-Control} directives other than {@code max-age} (see
  * <a href="http://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.9" >RFC
  * 2616 section 14.9</a>), you can use other servlet filters or <a
- * href="http://httpd.apache.org/docs/2.2/mod/mod_headers.html" >Apache Httpd
+ * href="https://httpd.apache.org/docs/2.2/mod/mod_headers.html" >Apache Httpd
  * mod_headers</a> module.
  * </p>
  * <h1>Filter Configuration</h1><h2>Basic configuration to add
@@ -1021,7 +1021,6 @@ public class ExpiresFilter extends FilterBase {
          */
         @Override
         public boolean isReady() {
-            // TODO Auto-generated method stub
             return false;
         }
 
@@ -1030,11 +1029,7 @@ public class ExpiresFilter extends FilterBase {
          */
         @Override
         public void setWriteListener(WriteListener listener) {
-            // TODO Auto-generated method stub
-
         }
-
-
 
     }
 
@@ -1050,7 +1045,9 @@ public class ExpiresFilter extends FilterBase {
 
     private static final String HEADER_LAST_MODIFIED = "Last-Modified";
 
-    private static final Log log = LogFactory.getLog(ExpiresFilter.class);
+    // Log must be non-static as loggers are created per class-loader and this
+    // Filter may be used in multiple class loaders
+    private final Log log = LogFactory.getLog(ExpiresFilter.class); // must not be static
 
     private static final String PARAMETER_EXPIRES_BY_TYPE = "ExpiresByType";
 
@@ -1074,9 +1071,8 @@ public class ExpiresFilter extends FilterBase {
             try {
                 ints[i] = Integer.parseInt(intAsString);
             } catch (NumberFormatException e) {
-                throw new RuntimeException("Exception parsing number '" + i +
-                        "' (zero based) of comma delimited list '" +
-                        commaDelimitedInts + "'");
+                throw new RuntimeException(sm.getString("expiresFilter.numberError",
+                        Integer.valueOf(i), commaDelimitedInts));
             }
         }
         return ints;
@@ -1168,7 +1164,7 @@ public class ExpiresFilter extends FilterBase {
 
     /**
      * @return the subset of the given {@code str} that is before the first
-     * occurence of the given {@code separator}. Return {@code null}
+     * occurrence of the given {@code separator}. Return {@code null}
      * if the given {@code str} or the given {@code separator} is
      * null. Return and empty string if the {@code separator} is empty.
      *

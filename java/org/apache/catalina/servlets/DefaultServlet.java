@@ -37,7 +37,6 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.security.AccessController;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Enumeration;
 import java.util.Iterator;
 import java.util.List;
@@ -75,6 +74,7 @@ import org.apache.catalina.connector.ResponseFacade;
 import org.apache.catalina.util.ServerInfo;
 import org.apache.catalina.util.URLEncoder;
 import org.apache.tomcat.util.buf.B2CConverter;
+import org.apache.tomcat.util.http.ResponseUtil;
 import org.apache.tomcat.util.res.StringManager;
 import org.apache.tomcat.util.security.Escape;
 import org.apache.tomcat.util.security.PrivilegedGetTccl;
@@ -335,7 +335,7 @@ public class DefaultServlet extends HttpServlet {
                 Globals.RESOURCES_ATTR);
 
         if (resources == null) {
-            throw new UnavailableException("No resources");
+            throw new UnavailableException(sm.getString("defaultServlet.noResources"));
         }
 
         if (getServletConfig().getInitParameter("showServerInfo") != null) {
@@ -868,18 +868,7 @@ public class DefaultServlet extends HttpServlet {
             List<PrecompressedResource> precompressedResources =
                     getAvailablePrecompressedResources(path);
             if (!precompressedResources.isEmpty()) {
-                Collection<String> varyHeaders = response.getHeaders("Vary");
-                boolean addRequired = true;
-                for (String varyHeader : varyHeaders) {
-                    if ("*".equals(varyHeader) ||
-                            "accept-encoding".equalsIgnoreCase(varyHeader)) {
-                        addRequired = false;
-                        break;
-                    }
-                }
-                if (addRequired) {
-                    response.addHeader("Vary", "accept-encoding");
-                }
+                ResponseUtil.addVaryFieldName(response, "accept-encoding");
                 PrecompressedResource bestResource =
                         getBestPrecompressedResource(request, precompressedResources);
                 if (bestResource != null) {
@@ -1005,7 +994,10 @@ public class DefaultServlet extends HttpServlet {
                 if (debug > 0)
                     log("DefaultServlet.serveFile:  contentType='" +
                         contentType + "'");
-                response.setContentType(contentType);
+                // Don't override a previously set content type
+                if (response.getContentType() == null) {
+                    response.setContentType(contentType);
+                }
             }
             if (resource.isFile() && contentLength >= 0 &&
                     (!serveContent || ostream != null)) {
@@ -1323,6 +1315,10 @@ public class DefaultServlet extends HttpServlet {
         if (request.getQueryString() != null) {
             location.append('?');
             location.append(request.getQueryString());
+        }
+        // Avoid protocol relative redirects
+        while (location.length() > 1 && location.charAt(1) == '/') {
+            location.deleteCharAt(0);
         }
         response.sendRedirect(response.encodeRedirectURL(location.toString()));
     }
@@ -1674,7 +1670,7 @@ public class DefaultServlet extends HttpServlet {
             osWriter.flush();
             return new ByteArrayInputStream(stream.toByteArray());
         } catch (TransformerException e) {
-            throw new ServletException("XSL transformer error", e);
+            throw new ServletException(sm.getString("defaultServlet.xslError"), e);
         } finally {
             if (Globals.IS_SECURITY_ENABLED) {
                 PrivilegedSetTccl pa = new PrivilegedSetTccl(original);
@@ -1878,7 +1874,7 @@ public class DefaultServlet extends HttpServlet {
                     }
                     copyRange(reader, new PrintWriter(buffer));
                 } catch (IOException e) {
-                    log("Failure to close reader", e);
+                    log(sm.getString("defaultServlet.readerCloseFailed"), e);
                 } finally {
                     if (reader != null) {
                         try {

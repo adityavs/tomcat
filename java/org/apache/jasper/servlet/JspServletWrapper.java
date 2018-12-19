@@ -80,22 +80,29 @@ public class JspServletWrapper {
     }
 
     // Logger
-    private final Log log = LogFactory.getLog(JspServletWrapper.class);
+    private final Log log = LogFactory.getLog(JspServletWrapper.class); // must not be static
 
-    private Servlet theServlet;
+    private volatile Servlet theServlet;
     private final String jspUri;
-    private Class<?> tagHandlerClass;
+    private volatile Class<?> tagHandlerClass;
     private final JspCompilationContext ctxt;
     private long available = 0L;
     private final ServletConfig config;
     private final Options options;
-    private boolean firstTime = true;
-    /** Whether the servlet needs reloading on next access */
+    /*
+     * The servlet / tag file needs a compilation check on first access. Use a
+     * separate flag (rather then theServlet == null / tagHandlerClass == null
+     * as it avoids the potentially expensive isOutDated() calls in
+     * ctxt.compile() if there are multiple concurrent requests for the servlet
+     * / tag before the class has been loaded.
+     */
+    private volatile boolean mustCompile = true;
+    /* Whether the servlet/tag file needs reloading on next access */
     private volatile boolean reload = true;
     private final boolean isTagFile;
     private int tripCount;
     private JasperException compileException;
-    /** Timestamp of last time servlet resource was modified */
+    /* Timestamp of last time servlet resource was modified */
     private volatile long servletClassLastModifiedTime;
     private long lastModificationTest = 0L;
     private long lastUsageTime = System.currentTimeMillis();
@@ -153,15 +160,29 @@ public class JspServletWrapper {
         this.reload = reload;
     }
 
+    public boolean getReload() {
+        return reload;
+    }
+
+    private boolean getReloadInternal() {
+        return reload && !ctxt.getRuntimeContext().isCompileCheckInProgress();
+    }
+
     public Servlet getServlet() throws ServletException {
-        // DCL on 'reload' requires that 'reload' be volatile
-        // (this also forces a read memory barrier, ensuring the
-        // new servlet object is read consistently)
-        if (reload) {
+        /*
+         * DCL on 'reload' requires that 'reload' be volatile
+         * (this also forces a read memory barrier, ensuring the new servlet
+         * object is read consistently).
+         *
+         * When running in non development mode with a checkInterval it is
+         * possible (see BZ 62603) for a race condition to cause failures
+         * if a Servlet or tag is reloaded while a compile check is running
+         */
+        if (getReloadInternal() || theServlet == null) {
             synchronized (this) {
                 // Synchronizing on jsw enables simultaneous loading
                 // of different pages, but not the same page.
-                if (reload) {
+                if (getReloadInternal() || theServlet == null) {
                     // This is to maintain the original protocol.
                     destroy();
 
@@ -179,7 +200,7 @@ public class JspServletWrapper {
 
                     servlet.init(config);
 
-                    if (!firstTime) {
+                    if (theServlet != null) {
                         ctxt.getRuntimeContext().incrementJspReloadCount();
                     }
 
@@ -243,10 +264,12 @@ public class JspServletWrapper {
             if (ctxt.isRemoved()) {
                 throw new FileNotFoundException(jspUri);
             }
-            if (options.getDevelopment() || firstTime ) {
+            if (options.getDevelopment() || mustCompile) {
                 synchronized (this) {
-                    firstTime = false;
-                    ctxt.compile();
+                    if (options.getDevelopment() || mustCompile) {
+                        ctxt.compile();
+                        mustCompile = false;
+                    }
                 }
             } else {
                 if (compileException != null) {
@@ -254,9 +277,13 @@ public class JspServletWrapper {
                 }
             }
 
-            if (reload) {
-                tagHandlerClass = ctxt.load();
-                reload = false;
+            if (getReloadInternal() || tagHandlerClass == null) {
+                synchronized (this) {
+                    if (getReloadInternal() || tagHandlerClass == null) {
+                        tagHandlerClass = ctxt.load();
+                        reload = false;
+                    }
+                }
             }
         } catch (FileNotFoundException ex) {
             throw new JasperException(ex);
@@ -292,8 +319,12 @@ public class JspServletWrapper {
             Object target;
             if (isTagFile) {
                 if (reload) {
-                    tagHandlerClass = ctxt.load();
-                    reload = false;
+                    synchronized (this) {
+                        if (reload) {
+                            tagHandlerClass = ctxt.load();
+                            reload = false;
+                        }
+                    }
                 }
                 target = tagHandlerClass.newInstance();
             } else {
@@ -361,12 +392,13 @@ public class JspServletWrapper {
             /*
              * (1) Compile
              */
-            if (options.getDevelopment() || firstTime ) {
+            if (options.getDevelopment() || mustCompile) {
                 synchronized (this) {
-                    firstTime = false;
-
-                    // The following sets reload to true, if necessary
-                    ctxt.compile();
+                    if (options.getDevelopment() || mustCompile) {
+                        // The following sets reload to true, if necessary
+                        ctxt.compile();
+                        mustCompile = false;
+                    }
                 }
             } else {
                 if (compileException != null) {
@@ -532,7 +564,7 @@ public class JspServletWrapper {
      * number in the generated servlet that originated the exception to a line
      * number in the JSP.  Then constructs an exception containing that
      * information, and a snippet of the JSP to help debugging.
-     * Please see http://bz.apache.org/bugzilla/show_bug.cgi?id=37062 and
+     * Please see https://bz.apache.org/bugzilla/show_bug.cgi?id=37062 and
      * http://www.tfenne.com/jasper/ for more details.
      *</p>
      *

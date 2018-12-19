@@ -21,6 +21,8 @@ import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -90,7 +92,8 @@ class Util {
      */
     static ExpressionFactory getExpressionFactory() {
 
-        ClassLoader tccl = Thread.currentThread().getContextClassLoader();
+        ClassLoader tccl = getContextClassLoader();
+
         CacheValue cacheValue = null;
         ExpressionFactory factory = null;
 
@@ -656,6 +659,19 @@ class Util {
     }
 
 
+    static ClassLoader getContextClassLoader() {
+        ClassLoader tccl;
+        if (System.getSecurityManager() != null) {
+            PrivilegedAction<ClassLoader> pa = new PrivilegedGetTccl();
+            tccl = AccessController.doPrivileged(pa);
+        } else {
+            tccl = Thread.currentThread().getContextClassLoader();
+        }
+
+        return tccl;
+    }
+
+
     private abstract static class Wrapper {
 
         public static List<Wrapper> wrap(Method[] methods, String name) {
@@ -795,25 +811,29 @@ class Util {
         @Override
         public boolean equals(Object o)
         {
-            return o == this
-                    || (null != o
-                    && this.getClass().equals(o.getClass())
-                    && ((MatchResult)o).getExact() == this.getExact()
-                    && ((MatchResult)o).getAssignable() == this.getAssignable()
-                    && ((MatchResult)o).getCoercible() == this.getCoercible()
-                    && ((MatchResult)o).isBridge() == this.isBridge()
-                    )
-                    ;
+            return o == this || (null != o &&
+                    this.getClass().equals(o.getClass()) &&
+                    ((MatchResult)o).getExact() == this.getExact() &&
+                    ((MatchResult)o).getAssignable() == this.getAssignable() &&
+                    ((MatchResult)o).getCoercible() == this.getCoercible() &&
+                    ((MatchResult)o).isBridge() == this.isBridge());
         }
 
         @Override
         public int hashCode()
         {
-            return (this.isBridge() ? 1 << 24 : 0)
-                    ^ this.getExact() << 16
-                    ^ this.getAssignable() << 8
-                    ^ this.getCoercible()
-                    ;
+            return (this.isBridge() ? 1 << 24 : 0) ^
+                    this.getExact() << 16 ^
+                    this.getAssignable() << 8 ^
+                    this.getCoercible();
+        }
+    }
+
+
+    private static class PrivilegedGetTccl implements PrivilegedAction<ClassLoader> {
+        @Override
+        public ClassLoader run() {
+            return Thread.currentThread().getContextClassLoader();
         }
     }
 }

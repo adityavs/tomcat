@@ -49,6 +49,7 @@ import org.apache.coyote.http2.HpackDecoder.HeaderEmitter;
 import org.apache.coyote.http2.Http2Parser.Input;
 import org.apache.coyote.http2.Http2Parser.Output;
 import org.apache.tomcat.util.codec.binary.Base64;
+import org.apache.tomcat.util.compat.JrePlatform;
 import org.apache.tomcat.util.http.MimeHeaders;
 
 /**
@@ -442,15 +443,15 @@ public abstract class Http2TestBase extends TomcatBaseTest {
 
     protected String getCookieResponseTrace(int streamId, int cookieCount) {
         return getResponseBodyFrameTrace(streamId, "text/plain;charset=UTF-8",
-                "Cookie count: " + cookieCount);
+                "Cookie count: " + cookieCount, null);
     }
 
 
     private String getResponseBodyFrameTrace(int streamId, String body) {
-        return getResponseBodyFrameTrace(streamId, "application/octet-stream", body);
+        return getResponseBodyFrameTrace(streamId, "application/octet-stream", body, body);
     }
 
-    private String getResponseBodyFrameTrace(int streamId, String contentType, String body) {
+    private String getResponseBodyFrameTrace(int streamId, String contentType, String body, String cl) {
         StringBuilder result = new StringBuilder();
         result.append(streamId);
         result.append("-HeadersStart\n");
@@ -460,6 +461,12 @@ public abstract class Http2TestBase extends TomcatBaseTest {
         result.append("-Header-[content-type]-[");
         result.append(contentType);
         result.append("]\n");
+        if (cl != null) {
+            result.append(streamId);
+            result.append("-Header-[content-length]-[");
+            result.append(cl);
+            result.append("]\n");
+        }
         result.append(streamId);
         result.append("-Header-[date]-[");
         result.append(DEFAULT_DATE);
@@ -837,8 +844,8 @@ public abstract class Http2TestBase extends TomcatBaseTest {
             Assume.assumeTrue("This test is only expected to trigger an exception with NIO2",
                     connector.getProtocolHandlerClassName().contains("Nio2"));
 
-            Assume.assumeTrue("This test is only expected to trigger an exception on Windo9ws",
-                    System.getProperty("os.name").startsWith("Windows"));
+            Assume.assumeTrue("This test is only expected to trigger an exception on Windows",
+                    JrePlatform.IS_WINDOWS);
         }
     }
 
@@ -890,6 +897,7 @@ public abstract class Http2TestBase extends TomcatBaseTest {
         private ConnectionSettingsRemote remoteSettings = new ConnectionSettingsRemote("-1");
         private boolean traceBody = false;
         private ByteBuffer bodyBuffer = null;
+        private long bytesRead;
 
         public void setTraceBody(boolean traceBody) {
             this.traceBody = traceBody;
@@ -905,6 +913,7 @@ public abstract class Http2TestBase extends TomcatBaseTest {
         @Override
         public ByteBuffer startRequestBodyFrame(int streamId, int payloadSize) {
             lastStreamId = Integer.toString(streamId);
+            bytesRead += payloadSize;
             if (traceBody) {
                 bodyBuffer = ByteBuffer.allocate(payloadSize);
                 return bodyBuffer;
@@ -1068,6 +1077,7 @@ public abstract class Http2TestBase extends TomcatBaseTest {
 
         public void clearTrace() {
             trace = new StringBuffer();
+            bytesRead = 0;
         }
 
 
@@ -1078,6 +1088,11 @@ public abstract class Http2TestBase extends TomcatBaseTest {
 
         public int getMaxFrameSize() {
             return remoteSettings.getMaxFrameSize();
+        }
+
+
+        public long getBytesRead() {
+            return bytesRead;
         }
     }
 
@@ -1100,6 +1115,8 @@ public abstract class Http2TestBase extends TomcatBaseTest {
     protected static class SimpleServlet extends HttpServlet {
 
         private static final long serialVersionUID = 1L;
+
+        public static final int CONTENT_LENGTH = 8192;
 
         @Override
         protected void doGet(HttpServletRequest req, HttpServletResponse resp)
@@ -1156,7 +1173,7 @@ public abstract class Http2TestBase extends TomcatBaseTest {
 
             int count = 128 * 1024;
             // Two bytes per entry
-            resp.setContentLengthLong(count * 2);
+            resp.setContentLengthLong(count * 2L);
 
             OutputStream os = resp.getOutputStream();
             byte[] data = new byte[2];

@@ -169,7 +169,7 @@ public class NioReceiver extends ReceiverBase implements Runnable, NioReceiverMB
                 }
                 r.run();
             } catch (Exception x) {
-                log.error("", x);
+                log.error(sm.getString("nioReceiver.eventsError"), x);
             }
         }
     }
@@ -286,7 +286,7 @@ public class NioReceiver extends ReceiverBase implements Runnable, NioReceiverMB
                     if (key.isAcceptable()) {
                         ServerSocketChannel server = (ServerSocketChannel) key.channel();
                         SocketChannel channel = server.accept();
-                        channel.socket().setReceiveBufferSize(getTxBufSize());
+                        channel.socket().setReceiveBufferSize(getRxBufSize());
                         channel.socket().setSendBufferSize(getTxBufSize());
                         channel.socket().setTcpNoDelay(getTcpNoDelay());
                         channel.socket().setKeepAlive(getSoKeepAlive());

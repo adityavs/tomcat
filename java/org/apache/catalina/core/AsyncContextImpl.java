@@ -19,9 +19,7 @@ package org.apache.catalina.core;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.naming.NamingException;
@@ -47,7 +45,6 @@ import org.apache.coyote.AsyncContextCallback;
 import org.apache.coyote.RequestInfo;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
-import org.apache.tomcat.InstanceManager;
 import org.apache.tomcat.util.ExceptionUtils;
 import org.apache.tomcat.util.buf.UDecoder;
 import org.apache.tomcat.util.res.StringManager;
@@ -78,7 +75,6 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
     private long timeout = -1;
     private AsyncEvent event = null;
     private volatile Request request;
-    private volatile InstanceManager instanceManager;
 
     public AsyncContextImpl(Request request) {
         if (log.isDebugEnabled()) {
@@ -108,8 +104,8 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
                     listener.fireOnComplete(event);
                 } catch (Throwable t) {
                     ExceptionUtils.handleThrowable(t);
-                    log.warn("onComplete() failed for listener of type [" +
-                            listener.getClass().getName() + "]", t);
+                    log.warn(sm.getString("asyncContextImpl.onCompleteError",
+                            listener.getClass().getName()), t);
                 }
             }
         } finally {
@@ -136,8 +132,8 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
                         listener.fireOnTimeout(event);
                     } catch (Throwable t) {
                         ExceptionUtils.handleThrowable(t);
-                        log.warn("onTimeout() failed for listener of type [" +
-                                listener.getClass().getName() + "]", t);
+                        log.warn(sm.getString("asyncContextImpl.onTimeoutError",
+                                listener.getClass().getName()), t);
                     }
                 }
                 request.getCoyoteRequest().action(
@@ -268,8 +264,8 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
         check();
         T listener = null;
         try {
-             listener = (T) getInstanceManager().newInstance(clazz.getName(),
-                     clazz.getClassLoader());
+             listener = (T) context.getInstanceManager().newInstance(
+                     clazz.getName(), clazz.getClassLoader());
         } catch (ReflectiveOperationException | NamingException e) {
             ServletException se = new ServletException(e);
             throw se;
@@ -289,7 +285,6 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
         dispatch = null;
         event = null;
         hasOriginalRequestAndResponse = true;
-        instanceManager = null;
         listeners.clear();
         request = null;
         clearServletRequestResponse();
@@ -329,8 +324,8 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
                     listener.fireOnStartAsync(event);
                 } catch (Throwable t) {
                     ExceptionUtils.handleThrowable(t);
-                    log.warn("onStartAsync() failed for listener of type [" +
-                            listener.getClass().getName() + "]", t);
+                    log.warn(sm.getString("asyncContextImpl.onStartAsyncError",
+                            listener.getClass().getName()), t);
                 }
             }
         }
@@ -396,8 +391,8 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
                     listener.fireOnError(errorEvent);
                 } catch (Throwable t2) {
                     ExceptionUtils.handleThrowable(t2);
-                    log.warn("onError() failed for listener of type [" +
-                            listener.getClass().getName() + "]", t2);
+                    log.warn(sm.getString("asyncContextImpl.onErrorError",
+                            listener.getClass().getName()), t2);
                 }
             }
         }
@@ -488,20 +483,6 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
         }
     }
 
-    private InstanceManager getInstanceManager() {
-        if (instanceManager == null) {
-            if (context instanceof StandardContext) {
-                instanceManager = context.getInstanceManager();
-            } else {
-                instanceManager = new DefaultInstanceManager(null,
-                        new HashMap<String, Map<String, String>>(),
-                        context,
-                        getClass().getClassLoader());
-            }
-        }
-        return instanceManager;
-    }
-
     private void check() {
         if (request == null) {
             // AsyncContext has been recycled and should not be being used
@@ -564,9 +545,8 @@ public class AsyncContextImpl implements AsyncContext, AsyncContextCallback {
             request.getCoyoteRequest().action(ActionCode.ASYNC_DISPATCHED, null);
             try {
                 applicationDispatcher.dispatch(servletRequest, servletResponse);
-            }catch (Exception x) {
-                //log.error("Async.dispatch",x);
-                throw new RuntimeException(x);
+            } catch (Exception e) {
+                throw new RuntimeException(sm.getString("asyncContextImpl.asyncDispachError"), e);
             }
         }
 

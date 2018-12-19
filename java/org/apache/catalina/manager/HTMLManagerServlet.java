@@ -134,7 +134,7 @@ public final class HTMLManagerServlet extends ManagerServlet {
                 doSessions(cn, request, response, smClient);
                 return;
             } catch (Exception e) {
-                log("HTMLManagerServlet.sessions[" + cn + "]", e);
+                log(sm.getString("htmlManagerServlet.error.sessions", cn), e);
                 message = smClient.getString("managerServlet.exception",
                         e.toString());
             }
@@ -185,14 +185,19 @@ public final class HTMLManagerServlet extends ManagerServlet {
         if (path != null) {
             cn = new ContextName(path, request.getParameter("version"));
         }
+
         String deployPath = request.getParameter("deployPath");
-        ContextName deployCn = null;
-        if (deployPath != null) {
-            deployCn = new ContextName(deployPath,
-                    request.getParameter("deployVersion"));
-        }
-        String deployConfig = request.getParameter("deployConfig");
         String deployWar = request.getParameter("deployWar");
+        String deployConfig = request.getParameter("deployConfig");
+        ContextName deployCn = null;
+        if (deployPath != null && deployPath.length() > 0) {
+            deployCn = new ContextName(deployPath, request.getParameter("deployVersion"));
+        } else if (deployConfig != null && deployConfig.length() > 0) {
+            deployCn = ContextName.extractFromPath(deployConfig);
+        } else if (deployWar != null && deployWar.length() > 0) {
+            deployCn = ContextName.extractFromPath(deployWar);
+        }
+
         String tlsHostName = request.getParameter("tlsHostName");
 
         // Prepare our output writer to generate the response message
@@ -527,14 +532,15 @@ public final class HTMLManagerServlet extends ManagerServlet {
         }
 
         // Deploy Section
-        args = new Object[7];
+        args = new Object[8];
         args[0] = smClient.getString("htmlManagerServlet.deployTitle");
         args[1] = smClient.getString("htmlManagerServlet.deployServer");
         args[2] = response.encodeURL(request.getContextPath() + "/html/deploy");
         args[3] = smClient.getString("htmlManagerServlet.deployPath");
-        args[4] = smClient.getString("htmlManagerServlet.deployConfig");
-        args[5] = smClient.getString("htmlManagerServlet.deployWar");
-        args[6] = smClient.getString("htmlManagerServlet.deployButton");
+        args[4] = smClient.getString("htmlManagerServlet.deployVersion");
+        args[5] = smClient.getString("htmlManagerServlet.deployConfig");
+        args[6] = smClient.getString("htmlManagerServlet.deployWar");
+        args[7] = smClient.getString("htmlManagerServlet.deployButton");
         writer.print(MessageFormat.format(DEPLOY_SECTION, args));
 
         args = new Object[4];
@@ -821,7 +827,7 @@ public final class HTMLManagerServlet extends ManagerServlet {
             try {
                 idle = Integer.parseInt(idleParam);
             } catch (NumberFormatException e) {
-                log("Could not parse idle parameter to an int: " + idleParam);
+                log(sm.getString("managerServlet.error.idleParam", idleParam));
             }
         }
         return sessions(cn, idle, smClient);
@@ -952,7 +958,7 @@ public final class HTMLManagerServlet extends ManagerServlet {
                     req.setAttribute(APPLICATION_ERROR, "Can't sort session list: one session is invalidated");
                 }
             } else {
-                log("WARNING: unknown sort order: " + sortBy);
+                log(sm.getString("htmlManagerServlet.error.sortOrder", sortBy));
             }
         }
         // keep sort order
@@ -1015,7 +1021,7 @@ public final class HTMLManagerServlet extends ManagerServlet {
             if (null == session) {
                 // Shouldn't happen, but let's play nice...
                 if (debug >= 1) {
-                    log("WARNING: can't invalidate null session " + sessionId);
+                    log("Cannot invalidate null session " + sessionId);
                 }
                 continue;
             }
@@ -1027,7 +1033,7 @@ public final class HTMLManagerServlet extends ManagerServlet {
                 }
             } catch (IllegalStateException ise) {
                 if (debug >= 1) {
-                    log("Can't invalidate already invalidated session id " + sessionId);
+                    log("Cannot invalidate already invalidated session id " + sessionId);
                 }
             }
         }
@@ -1050,7 +1056,7 @@ public final class HTMLManagerServlet extends ManagerServlet {
         if (null == session) {
             // Shouldn't happen, but let's play nice...
             if (debug >= 1) {
-                log("WARNING: can't remove attribute '" + attributeName + "' for null session " + sessionId);
+                log("Cannot remove attribute '" + attributeName + "' for null session " + sessionId);
             }
             return false;
         }
@@ -1059,7 +1065,7 @@ public final class HTMLManagerServlet extends ManagerServlet {
             session.removeAttribute(attributeName);
         } catch (IllegalStateException ise) {
             if (debug >= 1) {
-                log("Can't remote attribute '" + attributeName + "' for invalidated session id " + sessionId);
+                log("Cannot remote attribute '" + attributeName + "' for invalidated session id " + sessionId);
             }
         }
         return wasPresent;
@@ -1199,7 +1205,7 @@ public final class HTMLManagerServlet extends ManagerServlet {
         "  <small><input type=\"submit\" value=\"{5}\"></small>" +
         "  </form>\n" +
         "  <form class=\"inline\" method=\"POST\" action=\"{6}\">" +
-        "  <small><input type=\"submit\" value=\"{7}\"></small>" +
+        "  &nbsp;&nbsp;<small><input type=\"submit\" value=\"{7}\"></small>" +
         "  </form>\n" +
         " </td>\n" +
         " </tr><tr>\n" +
@@ -1284,12 +1290,20 @@ public final class HTMLManagerServlet extends ManagerServlet {
         "  <small>{4}</small>\n" +
         " </td>\n" +
         " <td class=\"row-left\">\n" +
-        "  <input type=\"text\" name=\"deployConfig\" size=\"20\">\n" +
+        "  <input type=\"text\" name=\"deployVersion\" size=\"20\">\n" +
         " </td>\n" +
         "</tr>\n" +
         "<tr>\n" +
         " <td class=\"row-right\">\n" +
         "  <small>{5}</small>\n" +
+        " </td>\n" +
+        " <td class=\"row-left\">\n" +
+        "  <input type=\"text\" name=\"deployConfig\" size=\"20\">\n" +
+        " </td>\n" +
+        "</tr>\n" +
+        "<tr>\n" +
+        " <td class=\"row-right\">\n" +
+        "  <small>{6}</small>\n" +
         " </td>\n" +
         " <td class=\"row-left\">\n" +
         "  <input type=\"text\" name=\"deployWar\" size=\"40\">\n" +
@@ -1300,7 +1314,7 @@ public final class HTMLManagerServlet extends ManagerServlet {
         "  &nbsp;\n" +
         " </td>\n" +
         " <td class=\"row-left\">\n" +
-        "  <input type=\"submit\" value=\"{6}\">\n" +
+        "  <input type=\"submit\" value=\"{7}\">\n" +
         " </td>\n" +
         "</tr>\n" +
         "</table>\n" +

@@ -19,6 +19,7 @@
 package org.apache.catalina;
 
 import java.io.File;
+import java.util.concurrent.ScheduledExecutorService;
 
 import org.apache.catalina.deploy.NamingResourcesImpl;
 import org.apache.catalina.startup.Catalina;
@@ -73,6 +74,9 @@ public interface Server extends Lifecycle {
 
     /**
      * @return the port number we listen to for shutdown commands.
+     *
+     * @see #getPortOffset()
+     * @see #getPortWithOffset()
      */
     public int getPort();
 
@@ -81,9 +85,37 @@ public interface Server extends Lifecycle {
      * Set the port number we listen to for shutdown commands.
      *
      * @param port The new port number
+     *
+     * @see #setPortOffset(int)
      */
     public void setPort(int port);
 
+    /**
+     * Get the number that offsets the port used for shutdown commands.
+     * For example, if port is 8005, and portOffset is 1000,
+     * the server listens at 9005.
+     *
+     * @return the port offset
+     */
+    public int getPortOffset();
+
+    /**
+     * Set the number that offsets the server port used for shutdown commands.
+     * For example, if port is 8005, and you set portOffset to 1000,
+     * connector listens at 9005.
+     *
+     * @param portOffset sets the port offset
+     */
+    public void setPortOffset(int portOffset);
+
+    /**
+     * Get the actual port on which server is listening for the shutdown commands.
+     * If you do not set port offset, port is returned. If you set
+     * port offset, port offset + port is returned.
+     *
+     * @return the port with offset
+     */
+    public int getPortWithOffset();
 
     /**
      * @return the address on which we listen to for shutdown commands.
@@ -173,6 +205,20 @@ public interface Server extends Lifecycle {
     public void setCatalinaHome(File catalinaHome);
 
 
+    /**
+     * Get the utility thread count.
+     * @return the thread count
+     */
+    public int getUtilityThreads();
+
+
+    /**
+     * Set the utility thread count.
+     * @param utilityThreads the new thread count
+     */
+    public void setUtilityThreads(int utilityThreads);
+
+
     // --------------------------------------------------------- Public Methods
 
 
@@ -219,4 +265,10 @@ public interface Server extends Lifecycle {
      * context.
      */
     public Object getNamingToken();
+
+    /**
+     * @return the utility executor managed by the Service.
+     */
+    public ScheduledExecutorService getUtilityExecutor();
+
 }

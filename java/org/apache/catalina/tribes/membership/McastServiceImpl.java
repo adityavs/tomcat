@@ -26,8 +26,6 @@ import java.net.InetSocketAddress;
 import java.net.MulticastSocket;
 import java.net.SocketTimeoutException;
 import java.util.Arrays;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.catalina.tribes.Channel;
@@ -36,7 +34,6 @@ import org.apache.catalina.tribes.MembershipListener;
 import org.apache.catalina.tribes.MessageListener;
 import org.apache.catalina.tribes.io.ChannelData;
 import org.apache.catalina.tribes.io.XByteBuffer;
-import org.apache.catalina.tribes.util.ExecutorFactory;
 import org.apache.catalina.tribes.util.StringManager;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
@@ -50,7 +47,7 @@ import org.apache.juli.logging.LogFactory;
  * Need to fix this, could use java.nio and only need one thread to send and receive, or
  * just use a timeout on the receive
  */
-public class McastServiceImpl {
+public class McastServiceImpl extends MembershipProviderBase {
 
     private static final Log log = LogFactory.getLog(McastService.class);
 
@@ -62,7 +59,7 @@ public class McastServiceImpl {
      */
     protected volatile boolean doRunSender = false;
     protected volatile boolean doRunReceiver = false;
-    protected int startLevel = 0;
+    protected volatile int startLevel = 0;
     /**
      * Socket that we intend to listen to
      */
@@ -95,10 +92,7 @@ public class McastServiceImpl {
      * Reuse the receivePacket, no need to create a new one everytime
      */
     protected DatagramPacket receivePacket;
-    /**
-     * The membership, used so that we calculate memberships when they arrive or don't arrive
-     */
-    protected Membership membership;
+
     /**
      * The actual listener, for callback when stuff goes down
      */
@@ -143,12 +137,6 @@ public class McastServiceImpl {
      * Add the ability to turn on/off recovery
      */
     protected boolean recoveryEnabled = true;
-
-    /**
-     * Dont interrupt the sender/receiver thread, but pass off to an executor
-     */
-    protected final ExecutorService executor =
-            ExecutorFactory.newThreadPool(0, 2, 2, TimeUnit.SECONDS);
 
     /**
      * disable/enable local loopback message
@@ -256,6 +244,7 @@ public class McastServiceImpl {
      * @throws IOException if the service fails to start
      * @throws IllegalStateException if the service is already started
      */
+    @Override
     public synchronized void start(int level) throws IOException {
         boolean valid = false;
         if ( (level & Channel.MBR_RX_SEQ)==Channel.MBR_RX_SEQ ) {
@@ -308,6 +297,7 @@ public class McastServiceImpl {
      * @return <code>true</code> if the stop is complete
      * @throws IOException if the service fails to disconnect from the sockets
      */
+    @Override
     public synchronized boolean stop(int level) throws IOException {
         boolean valid = false;
 
@@ -330,6 +320,7 @@ public class McastServiceImpl {
         startLevel = (startLevel & (~level));
         //we're shutting down, send a shutdown message and close the socket
         if ( startLevel == 0 ) {
+            executor.shutdownNow();
             //send a stop message
             member.setCommand(Member.SHUTDOWN_PAYLOAD);
             send(false);

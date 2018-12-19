@@ -46,13 +46,15 @@ public class SmapStratum {
 
         public void setInputStartLine(int inputStartLine) {
             if (inputStartLine < 0)
-                throw new IllegalArgumentException("" + inputStartLine);
+                throw new IllegalArgumentException(Localizer.getMessage(
+                        "jsp.error.negativeParameter", Integer.valueOf(inputStartLine)));
             this.inputStartLine = inputStartLine;
         }
 
         public void setOutputStartLine(int outputStartLine) {
             if (outputStartLine < 0)
-                throw new IllegalArgumentException("" + outputStartLine);
+                throw new IllegalArgumentException(Localizer.getMessage(
+                        "jsp.error.negativeParameter", Integer.valueOf(outputStartLine)));
             this.outputStartLine = outputStartLine;
         }
 
@@ -66,20 +68,23 @@ public class SmapStratum {
          */
         public void setLineFileID(int lineFileID) {
             if (lineFileID < 0)
-                throw new IllegalArgumentException("" + lineFileID);
+                throw new IllegalArgumentException(Localizer.getMessage(
+                        "jsp.error.negativeParameter", Integer.valueOf(lineFileID)));
             this.lineFileID = lineFileID;
             this.lineFileIDSet = true;
         }
 
         public void setInputLineCount(int inputLineCount) {
             if (inputLineCount < 0)
-                throw new IllegalArgumentException("" + inputLineCount);
+                throw new IllegalArgumentException(Localizer.getMessage(
+                        "jsp.error.negativeParameter", Integer.valueOf(inputLineCount)));
             this.inputLineCount = inputLineCount;
         }
 
         public void setOutputLineIncrement(int outputLineIncrement) {
             if (outputLineIncrement < 0)
-                throw new IllegalArgumentException("" + outputLineIncrement);
+                throw new IllegalArgumentException(Localizer.getMessage(
+                        "jsp.error.negativeParameter", Integer.valueOf(outputLineIncrement)));
             this.outputLineIncrement = outputLineIncrement;
         }
 

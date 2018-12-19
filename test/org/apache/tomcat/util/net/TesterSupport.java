@@ -26,7 +26,6 @@ import java.security.Principal;
 import java.security.PrivateKey;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
-import java.util.Locale;
 
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
@@ -50,6 +49,11 @@ import org.apache.catalina.core.AprLifecycleListener;
 import org.apache.catalina.core.StandardServer;
 import org.apache.catalina.startup.TesterMapRealm;
 import org.apache.catalina.startup.Tomcat;
+import org.apache.tomcat.jni.Library;
+import org.apache.tomcat.jni.LibraryNotFoundError;
+import org.apache.tomcat.jni.SSL;
+import org.apache.tomcat.util.compat.JrePlatform;
+import org.apache.tomcat.util.compat.TLS;
 import org.apache.tomcat.util.descriptor.web.LoginConfig;
 import org.apache.tomcat.util.descriptor.web.SecurityCollection;
 import org.apache.tomcat.util.descriptor.web.SecurityConstraint;
@@ -65,14 +69,43 @@ public final class TesterSupport {
     public static final String LOCALHOST_KEYPASS_JKS = SSL_DIR + "localhost-copy1.jks";
     public static final String JKS_PASS = "changeit";
     public static final String JKS_KEY_PASS = "tomcatpass";
+    public static final String CA_CERT_PEM = SSL_DIR + CA_ALIAS + "-cert.pem";
     public static final String LOCALHOST_CERT_PEM = SSL_DIR + "localhost-cert.pem";
     public static final String LOCALHOST_KEY_PEM = SSL_DIR + "localhost-key.pem";
+    public static final boolean OPENSSL_AVAILABLE;
+    public static final int OPENSSL_VERSION;
+    public static final String OPENSSL_ERROR;
 
     public static final String ROLE = "testrole";
 
-    private static String clientAuthExpectedIssuer = null;
+    private static String clientAuthExpectedIssuer;
     private static String lastUsage = "NONE";
     private static Principal[] lastRequestedIssuers = new Principal[0];
+
+    static {
+        boolean available = false;
+        int version = 0;
+        String err = "";
+        try {
+            Library.initialize(null);
+            available = true;
+            version = SSL.version();
+            Library.terminate();
+        } catch (Exception | LibraryNotFoundError ex) {
+            err = ex.getMessage();
+        }
+        OPENSSL_AVAILABLE = available;
+        OPENSSL_VERSION = version;
+        OPENSSL_ERROR = err;
+    }
+
+    public static boolean isOpensslAvailable() {
+        return OPENSSL_AVAILABLE;
+    }
+
+    public static int getOpensslVersion() {
+        return OPENSSL_VERSION;
+    }
 
     public static void initSsl(Tomcat tomcat) {
         initSsl(tomcat, LOCALHOST_JKS, null, null);
@@ -115,6 +148,10 @@ public final class TesterSupport {
                     LOCALHOST_KEY_PEM);
             tomcat.getConnector().setAttribute("SSLCertificateKeyFile",
                     keystoreFile.getAbsolutePath());
+            keystoreFile = new File(
+                    CA_CERT_PEM);
+            tomcat.getConnector().setAttribute("SSLCACertificateFile",
+                    keystoreFile.getAbsolutePath());
         }
         tomcat.getConnector().setSecure(true);
         tomcat.getConnector().setProperty("SSLEnabled", "true");
@@ -146,7 +183,7 @@ public final class TesterSupport {
 
     protected static void configureClientSsl() {
         try {
-            SSLContext sc = SSLContext.getInstance("TLS");
+            SSLContext sc = SSLContext.getInstance(Constants.SSL_PROTO_TLS);
             sc.init(TesterSupport.getUser1KeyManagers(),
                     TesterSupport.getTrustManagers(),
                     null);
@@ -165,10 +202,6 @@ public final class TesterSupport {
         return ks;
     }
 
-    protected static boolean isMacOs() {
-        return System.getProperty("os.name").toLowerCase(Locale.ENGLISH).startsWith("mac os x");
-    }
-
     protected static boolean isRenegotiationSupported(Tomcat tomcat) {
         String protocol = tomcat.getConnector().getProtocolHandlerClassName();
         if (protocol.contains("Apr")) {
@@ -185,7 +218,7 @@ public final class TesterSupport {
             // Disabled by default in 1.1.20 windows binary (2010-07-27)
             return false;
         }
-        if (protocol.contains("NioProtocol") || (protocol.contains("Nio2Protocol") && isMacOs())) {
+        if (protocol.contains("NioProtocol") || (protocol.contains("Nio2Protocol") && JrePlatform.IS_MAC_OS)) {
             // Doesn't work on all platforms - see BZ 56448.
             return false;
         }
@@ -200,6 +233,14 @@ public final class TesterSupport {
 
     protected static void configureClientCertContext(Tomcat tomcat) {
         TesterSupport.initSsl(tomcat);
+
+        /* When running on Java 11, TLSv1.3 is enabled by default. The JSSE
+         * implementation of TLSv1.3 does not support
+         * certificateVerification="optional", a setting on which these tests
+         * depend. Therefore, force these tests to use TLSv1.2 so that they pass
+         * when running on TLSv1.3.
+         */
+        tomcat.getConnector().setProperty("sslEnabledProtocols", Constants.SSL_PROTO_TLSv1_2);
 
         // Need a web application with a protected and unprotected URL
         // No file system docBase required
@@ -247,6 +288,10 @@ public final class TesterSupport {
         lc.setAuthMethod("CLIENT-CERT");
         ctx.setLoginConfig(lc);
         ctx.getPipeline().addValve(new SSLAuthenticator());
+
+        // Clear the tracking data
+        lastUsage = "NONE";
+        lastRequestedIssuers = new Principal[0];
     }
 
     protected static String getClientAuthExpectedIssuer() {
@@ -515,5 +560,37 @@ public final class TesterSupport {
                 throw new CertificateException();
             }
         }
+    }
+
+
+    /*
+     * We want to use TLS 1.3 where we can but this requires TLS 1.3 to be
+     * supported on the client and the server.
+     */
+    public static String getDefaultTLSProtocolForTesting(Connector connector) {
+        // Clients always use JSSE
+        if (!TLS.isTlsv13Available()) {
+            // Client doesn't support TLS 1.3 so we have to use TLS 1.2
+            return Constants.SSL_PROTO_TLSv1_2;
+        }
+
+        if (connector.getProtocolHandlerClassName().contains("Apr")) {
+            // APR connector so OpenSSL is used for TLS.
+            if (SSL.version() >= 0x1010100f) {
+                return Constants.SSL_PROTO_TLSv1_3;
+            } else {
+                return Constants.SSL_PROTO_TLSv1_2;
+            }
+        } else {
+            // NIO or NIO2. Tests do not use JSSE+OpenSSL so JSSE will be used.
+            // Due to check above, it is known that TLS 1.3 is available
+            return Constants.SSL_PROTO_TLSv1_3;
+        }
+    }
+
+
+    public static boolean isDefaultTLSProtocolForTesting13(Connector connector) {
+        return Constants.SSL_PROTO_TLSv1_3.equals(
+                TesterSupport.getDefaultTLSProtocolForTesting(connector));
     }
 }

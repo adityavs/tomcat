@@ -18,8 +18,8 @@ package org.apache.tomcat.util.net.jsse;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
-import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
@@ -42,6 +42,7 @@ import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
 
 import org.apache.tomcat.util.codec.binary.Base64;
+import org.apache.tomcat.util.file.ConfigFileLoader;
 import org.apache.tomcat.util.res.StringManager;
 
 /**
@@ -49,7 +50,7 @@ import org.apache.tomcat.util.res.StringManager;
  * i.e. with boundaries containing "BEGIN PRIVATE KEY" or "BEGIN ENCRYPTED PRIVATE KEY",
  * not "BEGIN RSA PRIVATE KEY" or other variations).
  */
-class PEMFile {
+public class PEMFile {
 
     private static final StringManager sm = StringManager.getManager(PEMFile.class);
 
@@ -70,14 +71,20 @@ class PEMFile {
     }
 
     public PEMFile(String filename, String password) throws IOException, GeneralSecurityException {
+        this(filename, password, null);
+    }
+
+    public PEMFile(String filename, String password, String keyAlgorithm)
+            throws IOException, GeneralSecurityException {
         this.filename = filename;
 
         List<Part> parts = new ArrayList<>();
-        try (BufferedReader in = new BufferedReader(new InputStreamReader(
-                new FileInputStream(filename), StandardCharsets.US_ASCII))) {
+        try (InputStream inputStream = ConfigFileLoader.getSource().getResource(filename).getInputStream()) {
+            BufferedReader reader =
+                    new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.US_ASCII));
             Part part = null;
             String line;
-            while ((line = in.readLine()) != null) {
+            while ((line = reader.readLine()) != null) {
                 if (line.startsWith(Part.BEGIN_BOUNDARY)) {
                     part = new Part();
                     part.type = line.substring(Part.BEGIN_BOUNDARY.length(), line.length() - 5).trim();
@@ -93,10 +100,10 @@ class PEMFile {
         for (Part part : parts) {
             switch (part.type) {
                 case "PRIVATE KEY":
-                    privateKey = part.toPrivateKey(null);
+                    privateKey = part.toPrivateKey(null, keyAlgorithm);
                     break;
                 case "ENCRYPTED PRIVATE KEY":
-                    privateKey = part.toPrivateKey(password);
+                    privateKey = part.toPrivateKey(password, keyAlgorithm);
                     break;
                 case "CERTIFICATE":
                 case "X509 CERTIFICATE":
@@ -122,7 +129,7 @@ class PEMFile {
             return (X509Certificate) factory.generateCertificate(new ByteArrayInputStream(decode()));
         }
 
-        public PrivateKey toPrivateKey(String password) throws GeneralSecurityException, IOException {
+        public PrivateKey toPrivateKey(String password, String keyAlgorithm) throws GeneralSecurityException, IOException {
             KeySpec keySpec;
 
             if (password == null) {
@@ -139,9 +146,17 @@ class PEMFile {
             }
 
             InvalidKeyException exception = new InvalidKeyException(sm.getString("jsse.pemParseError", filename));
-            for (String algorithm : new String[] {"RSA", "DSA", "EC"}) {
+            if (keyAlgorithm == null) {
+                for (String algorithm : new String[] {"RSA", "DSA", "EC"}) {
+                    try {
+                        return KeyFactory.getInstance(algorithm).generatePrivate(keySpec);
+                    } catch (InvalidKeySpecException e) {
+                        exception.addSuppressed(e);
+                    }
+                }
+            } else {
                 try {
-                    return KeyFactory.getInstance(algorithm).generatePrivate(keySpec);
+                    return KeyFactory.getInstance(keyAlgorithm).generatePrivate(keySpec);
                 } catch (InvalidKeySpecException e) {
                     exception.addSuppressed(e);
                 }

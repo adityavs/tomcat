@@ -58,6 +58,7 @@ import javax.net.ssl.X509KeyManager;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
 import org.apache.tomcat.util.compat.JreVendor;
+import org.apache.tomcat.util.compat.TLS;
 import org.apache.tomcat.util.file.ConfigFileLoader;
 import org.apache.tomcat.util.net.Constants;
 import org.apache.tomcat.util.net.SSLContext;
@@ -141,7 +142,12 @@ public class JSSEUtil extends SSLUtilBase {
 
 
     public JSSEUtil (SSLHostConfigCertificate certificate) {
-        super(certificate);
+        this(certificate, true);
+    }
+
+
+    public JSSEUtil (SSLHostConfigCertificate certificate, boolean warnOnSkip) {
+        super(certificate, warnOnSkip);
         this.sslHostConfig = certificate.getSSLHostConfig();
     }
 
@@ -161,6 +167,19 @@ public class JSSEUtil extends SSLUtilBase {
     @Override
     protected Set<String> getImplementedCiphers() {
         return implementedCiphers;
+    }
+
+
+    @Override
+    protected boolean isTls13Available() {
+        return TLS.isTlsv13Available();
+    }
+
+
+    @Override
+    protected boolean isTls13RenegAuthAvailable() {
+        // TLS 1.3 does not support authentication after the initial handshake
+        return false;
     }
 
 
@@ -199,15 +218,19 @@ public class JSSEUtil extends SSLUtilBase {
         char[] keyPassArray = keyPass.toCharArray();
 
         if (ks == null) {
-            PEMFile privateKeyFile = new PEMFile(SSLHostConfig.adjustRelativePath
-                    (certificate.getCertificateKeyFile() != null ? certificate.getCertificateKeyFile() : certificate.getCertificateFile()),
+            if (certificate.getCertificateFile() == null) {
+                throw new IOException(sm.getString("jsse.noCertFile"));
+            }
+
+            PEMFile privateKeyFile = new PEMFile(
+                    certificate.getCertificateKeyFile() != null ? certificate.getCertificateKeyFile() : certificate.getCertificateFile(),
                     keyPass);
-            PEMFile certificateFile = new PEMFile(SSLHostConfig.adjustRelativePath(certificate.getCertificateFile()));
+            PEMFile certificateFile = new PEMFile(certificate.getCertificateFile());
 
             Collection<Certificate> chain = new ArrayList<>();
             chain.addAll(certificateFile.getCertificates());
             if (certificate.getCertificateChainFile() != null) {
-                PEMFile certificateChainFile = new PEMFile(SSLHostConfig.adjustRelativePath(certificate.getCertificateChainFile()));
+                PEMFile certificateChainFile = new PEMFile(certificate.getCertificateChainFile());
                 chain.addAll(certificateChainFile.getCertificates());
             }
 
@@ -240,7 +263,8 @@ public class JSSEUtil extends SSLUtilBase {
             }
 
             Key k = ks.getKey(keyAlias, keyPassArray);
-            if (k != null && "PKCS#8".equalsIgnoreCase(k.getFormat())) {
+            if (k != null && !"DKS".equalsIgnoreCase(certificate.getCertificateKeystoreType()) &&
+                    "PKCS#8".equalsIgnoreCase(k.getFormat())) {
                 // Switch to in-memory key store
                 String provider = certificate.getCertificateKeystoreProvider();
                 if (provider == null) {
@@ -412,7 +436,7 @@ public class JSSEUtil extends SSLUtilBase {
         Collection<? extends CRL> crls = null;
         try {
             CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            try (InputStream is = ConfigFileLoader.getInputStream(crlf)) {
+            try (InputStream is = ConfigFileLoader.getSource().getResource(crlf).getInputStream()) {
                 crls = cf.generateCRLs(is);
             }
         } catch(IOException iex) {
